@@ -2,163 +2,256 @@
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HSM Schedule App</title>
+<title>HSM Schedule → Calendar</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 <style>
-body {
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    padding: 20px;
-    text-align: center;
-}
-button {
-    padding: 14px;
-    font-size: 16px;
-    width: 100%;
-    margin-top: 15px;
-    border-radius: 10px;
-    border: none;
-    background-color: #007AFF;
-    color: white;
-}
-input {
-    margin-top: 20px;
-}
-.card {
-    margin-top: 20px;
-    padding: 15px;
-    border-radius: 12px;
-    background: #f2f2f7;
-}
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 18px; text-align: center; }
+  h2 { margin: 8px 0 0; }
+  .sub { color: #555; margin: 6px 0 18px; font-size: 14px; }
+  button {
+    padding: 14px; font-size: 16px; width: 100%;
+    margin-top: 12px; border-radius: 12px; border: none;
+    background-color: #007AFF; color: white; font-weight: 600;
+  }
+  input { margin-top: 14px; width: 100%; }
+  .card { margin-top: 14px; padding: 14px; border-radius: 14px; background: #f2f2f7; text-align: left; }
+  .small { color:#666; font-size: 13px; margin-top: 6px; }
+  .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; background:#e8e8ed; font-size: 12px; margin-right: 8px; }
+  .err { background: #ffecec; }
 </style>
 </head>
 <body>
 
 <h2>HSM Schedule → Calendar</h2>
+<div class="sub">Upload PDF • Finds all BRAWER events • Downloads one .ics</div>
 
 <input type="file" id="pdfUpload" accept="application/pdf">
-<button onclick="processPDF()">Generate Calendar Event</button>
+<button onclick="processPDF()">Generate .ics</button>
 
 <div id="result"></div>
 
 <script>
 const LAST_NAME = "BRAWER";
 
-async function processPDF() {
-
-    const fileInput = document.getElementById('pdfUpload');
-    if (!fileInput.files.length) {
-        alert("Upload the schedule PDF.");
-        return;
-    }
-
-    const file = fileInput.files[0];
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-
-    let scheduleDate = null;
-    let foundEvent = null;
-
-    for (let p = 1; p <= pdf.numPages; p++) {
-        const page = await pdf.getPage(p);
-        const content = await page.getTextContent();
-
-        const pageText = content.items.map(i => i.str).join(" ");
-
-        if (!scheduleDate) {
-            const dateMatch = pageText.match(/DATE:\s+(\d{1,2}\s+\w+\s+\d{4})/);
-            if (dateMatch) scheduleDate = new Date(dateMatch[1]);
-        }
-
-        let rows = {};
-        content.items.forEach(item => {
-            const y = Math.round(item.transform[5]);
-            if (!rows[y]) rows[y] = [];
-            rows[y].push(item);
-        });
-
-        Object.values(rows).forEach(rowItems => {
-            const rowText = rowItems
-                .sort((a, b) => a.transform[4] - b.transform[4])
-                .map(i => i.str)
-                .join(" ");
-
-            if (rowText.includes(LAST_NAME)) {
-
-                const times = rowText.match(/\b\d{4}\b/g);
-                if (!times || times.length < 3) return;
-
-                const brf = times[0];
-                const etd = times[1];
-                const eta = times[2];
-
-                const evtMatch = rowText.match(/^\s*(\d+)\s+(.*?)(\d{4})/);
-                let evtNumber = "";
-                let evtName = "Event";
-
-                if (evtMatch) {
-                    evtNumber = evtMatch[1];
-                    evtName = evtMatch[2].trim();
-                }
-
-                const type = p === 2 ? "SIM" : "FLT";
-
-                foundEvent = {
-                    type,
-                    number: evtNumber,
-                    name: evtName,
-                    brf,
-                    etd,
-                    eta,
-                    rowText
-                };
-            }
-        });
-    }
-
-    if (!scheduleDate || !foundEvent) {
-        alert("Could not detect your event.");
-        return;
-    }
-
-    const ics = buildICS(scheduleDate, foundEvent);
-    downloadICS(ics);
-
-    document.getElementById("result").innerHTML =
-        `<div class="card">
-        <strong>${foundEvent.type} ${foundEvent.number}</strong><br>
-        ${foundEvent.name}<br><br>
-        ${foundEvent.brf} – ${foundEvent.eta}
-        </div>`;
+// --- helpers ---
+function pad2(n){ return String(n).padStart(2,'0'); }
+function yBucket(y){ return Math.round(y / 3) * 3; } // tolerance bucket for row grouping
+function isValidTime(t){ return /^[0-2]\d[0-5]\d$/.test(t); } // 0000-2959 (good enough)
+function uniqBy(arr, keyFn){
+  const seen = new Set(); const out = [];
+  for (const x of arr){
+    const k = keyFn(x);
+    if (!seen.has(k)) { seen.add(k); out.push(x); }
+  }
+  return out;
+}
+function guessType(rowText, pageNum){
+  const t = rowText.toUpperCase();
+  // keyword-based (more robust than "page 2 means sim")
+  if (t.includes("OFT") || t.includes("WTT") || t.includes("TOFT") || t.includes("SIM") || t.includes("DTD")) return "SIM";
+  if (t.includes("MH-60") || t.includes("CALLSIGN") || t.includes("A/C") || t.includes("TS") || t.includes("FLT")) return "FLT";
+  // ground-ish patterns
+  if (t.includes("ICW") || t.includes("CAI") || t.includes("IGR") || t.includes("IMATT") || t.includes("CRT") || t.includes("EXAM") || t.includes("LAB")) return "CLASS";
+  // fallback
+  return (pageNum === 1) ? "FLT" : "SIM";
 }
 
-function buildICS(date, e) {
-    const start = formatICSDate(date, e.brf);
-    const end = formatICSDate(date, e.eta);
+// Build ICS datetime in local “floating time” (imports cleanly on iPhone)
+function formatICSDate(dateObj, hhmm){
+  const y = dateObj.getFullYear();
+  const m = pad2(dateObj.getMonth()+1);
+  const d = pad2(dateObj.getDate());
+  return `${y}${m}${d}T${hhmm}00`;
+}
 
-    let ics = "BEGIN:VCALENDAR\nVERSION:2.0\n";
+function buildICS(scheduleDate, events){
+  let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//HSM Schedule//EN\nCALSCALE:GREGORIAN\n";
+
+  for (const e of events){
+    const uid = `${e.type}-${e.number || "NA"}-${e.start}-${e.end}-${scheduleDate.getTime()}@hsm`;
     ics += "BEGIN:VEVENT\n";
-    ics += `SUMMARY:${e.type} ${e.number} – ${e.name}\n`;
-    ics += `DTSTART:${start}\n`;
-    ics += `DTEND:${end}\n`;
-    ics += `DESCRIPTION:Brief ${e.brf}\\nETD ${e.etd}\\nETA ${e.eta}\n`;
-    ics += "END:VEVENT\nEND:VCALENDAR";
+    ics += `UID:${uid}\n`;
+    ics += `SUMMARY:${escapeICS(e.summary)}\n`;
+    ics += `DTSTART:${formatICSDate(scheduleDate, e.start)}\n`;
+    ics += `DTEND:${formatICSDate(scheduleDate, e.end)}\n`;
+    if (e.description) ics += `DESCRIPTION:${escapeICS(e.description)}\n`;
+    ics += "END:VEVENT\n";
+  }
 
-    return ics;
+  ics += "END:VCALENDAR";
+  return ics;
 }
 
-function formatICSDate(date, time) {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}${month}${day}T${time}00`;
+function escapeICS(s){
+  return String(s)
+    .replace(/\\/g, "\\\\")
+    .replace(/\n/g, "\\n")
+    .replace(/,/g, "\\,")
+    .replace(/;/g, "\\;");
 }
 
-function downloadICS(content) {
-    const blob = new Blob([content], { type: "text/calendar" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = "hsm_event.ics";
-    link.click();
+function downloadICS(content, filename="hsm_schedule.ics"){
+  const blob = new Blob([content], { type: "text/calendar" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+}
+
+// --- main ---
+async function processPDF(){
+  const resultEl = document.getElementById("result");
+  resultEl.innerHTML = "";
+
+  const fileInput = document.getElementById("pdfUpload");
+  if (!fileInput.files.length){
+    alert("Upload the schedule PDF.");
+    return;
+  }
+
+  const file = fileInput.files[0];
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+
+  let scheduleDate = null;
+  let candidates = [];
+
+  for (let p = 1; p <= pdf.numPages; p++){
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+
+    // Try to find DATE: on any page (usually page 1)
+    if (!scheduleDate){
+      const pageText = content.items.map(i => i.str).join(" ");
+      const dateMatch = pageText.match(/DATE:\s+(\d{1,2}\s+\w+\s+\d{4})/i);
+      if (dateMatch){
+        scheduleDate = new Date(dateMatch[1]);
+      }
+    }
+
+    // Group into "rows" by y position
+    const rows = {};
+    for (const item of content.items){
+      const y = yBucket(item.transform[5]);
+      if (!rows[y]) rows[y] = [];
+      rows[y].push(item);
+    }
+
+    for (const y of Object.keys(rows)){
+      const rowItems = rows[y]
+        .sort((a,b) => a.transform[4] - b.transform[4]);
+
+      const rowText = rowItems.map(i => i.str).join(" ").replace(/\s+/g," ").trim();
+
+      if (!rowText.toUpperCase().includes(LAST_NAME)) continue;
+
+      candidates.push({ pageNum: p, rowText });
+    }
+  }
+
+  if (!scheduleDate){
+    resultEl.innerHTML = `<div class="card err"><strong>Couldn’t find schedule DATE:</strong> make sure it’s the standard squadron format.</div>`;
+    return;
+  }
+
+  if (!candidates.length){
+    resultEl.innerHTML = `<div class="card err"><strong>No rows found for ${LAST_NAME}.</strong></div>`;
+    return;
+  }
+
+  // Parse each candidate row into an event
+  let events = [];
+
+  for (const c of candidates){
+    const t = c.rowText;
+    const type = guessType(t, c.pageNum);
+
+    // Case 1: SIM/FLT style rows with 3 distinct times (BRF ETD ETA)
+    const times = (t.match(/\b\d{4}\b/g) || []).filter(isValidTime);
+
+    if (times.length >= 3){
+      const brf = times[0], etd = times[1], eta = times[2];
+
+      // Event number and name: "10 OFT INST X x 2 1300 1400 1800 BRAWER ..."
+      const evtNumMatch = t.match(/^\s*(\d+)\s+/);
+      const evtNumber = evtNumMatch ? evtNumMatch[1] : "";
+
+      // Name: everything after evt number up to first time
+      let name = "Event";
+      const nameMatch = t.match(/^\s*\d+\s+(.*?)(?=\s+\d{4}\b)/);
+      if (nameMatch) name = nameMatch[1].trim();
+
+      // Students/crew snippet (everything after your last name)
+      let afterName = "";
+      const idx = t.toUpperCase().indexOf(LAST_NAME);
+      if (idx !== -1) afterName = t.slice(idx + LAST_NAME.length).trim();
+
+      const summary = `${type} ${evtNumber || ""} – ${name}`.replace(/\s+/g," ").trim();
+      const desc = `Source row:\n${t}\n\nBrief ${brf} / ETD ${etd} / ETA ${eta}${afterName ? ("\n\nCrew/Students: " + afterName) : ""}`;
+
+      events.push({
+        type,
+        number: evtNumber,
+        summary,
+        description: desc,
+        start: brf,
+        end: eta,
+      });
+
+      continue;
+    }
+
+    // Case 2: Ground/class rows with a time RANGE like 0700-1300
+    const rangeMatch = t.match(/\b(\d{4})\s*-\s*(\d{4})\b/);
+    if (rangeMatch && isValidTime(rangeMatch[1]) && isValidTime(rangeMatch[2])){
+      const start = rangeMatch[1], end = rangeMatch[2];
+
+      // Heuristic: use the chunk around the time as the title
+      // Example: "Tweltridge... IGR ... 0700-1300 C-9 Venard..."
+      let summary = `CLASS – ${t}`; // fallback
+      // Trim long summaries
+      if (summary.length > 90) summary = summary.slice(0, 87) + "...";
+
+      events.push({
+        type: "CLASS",
+        number: "",
+        summary,
+        description: `Source row:\n${t}`,
+        start,
+        end,
+      });
+
+      continue;
+    }
+
+    // If we got here, we found your name but couldn’t parse times in that row.
+    // Keep a “diagnostic” card so you can tell me what it looks like.
+  }
+
+  // De-dupe (PDF.js can sometimes produce duplicate near-identical rows)
+  events = uniqBy(events, e => `${e.type}|${e.summary}|${e.start}|${e.end}`);
+
+  if (!events.length){
+    resultEl.innerHTML = `<div class="card err"><strong>Found ${LAST_NAME} but couldn’t parse times.</strong><div class="small">If you paste a screenshot of the row it found, I’ll tune the parser.</div></div>`;
+    return;
+  }
+
+  // Build + download a single ICS with all events
+  const ics = buildICS(scheduleDate, events);
+  downloadICS(ics);
+
+  // UI preview
+  const dateLabel = `${scheduleDate.toDateString()}`;
+  let html = `<div class="card"><div><span class="pill">${dateLabel}</span><span class="pill">${events.length} event(s)</span></div>`;
+  html += `<div class="small">Downloaded: <strong>hsm_schedule.ics</strong></div><hr style="border:none;border-top:1px solid #ddd;margin:12px 0;">`;
+  for (const e of events){
+    html += `<div style="margin-bottom:10px;">
+      <div><strong>${e.summary}</strong></div>
+      <div class="small">${e.start}–${e.end}</div>
+    </div>`;
+  }
+  html += `</div>`;
+  resultEl.innerHTML = html;
 }
 </script>
 
