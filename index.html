@@ -6,23 +6,45 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 
 <style>
-body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 18px; text-align: center; }
-button {
-  padding: 14px; font-size: 16px; width: 100%;
-  margin-top: 12px; border-radius: 12px; border: none;
-  background-color: #007AFF; color: white; font-weight: 600;
-}
-input { margin-top: 14px; width: 100%; }
-.card { margin-top: 14px; padding: 14px; border-radius: 14px; background: #f2f2f7; text-align: left; }
-.err { background: #ffecec; }
-.small { color:#666; font-size: 13px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 18px; text-align: center; }
+  h2 { margin: 8px 0 0; }
+  .sub { color: #555; margin: 6px 0 18px; font-size: 14px; }
+
+  button {
+    padding: 14px; font-size: 16px; width: 100%;
+    margin-top: 12px; border-radius: 12px; border: none;
+    background-color: #007AFF; color: white; font-weight: 600;
+  }
+  input[type="file"] { margin-top: 14px; width: 100%; }
+  input[type="date"] {
+    width: 100%; padding: 12px; font-size: 16px;
+    border-radius: 12px; border: 1px solid #ccc;
+    margin-top: 10px;
+  }
+
+  .card { margin-top: 14px; padding: 14px; border-radius: 14px; background: #f2f2f7; text-align: left; }
+  .err { background: #ffecec; }
+  .warn { background: #fff4dd; }
+  .small { color:#666; font-size: 13px; margin-top: 6px; }
+  .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; background:#e8e8ed; font-size: 12px; margin-right: 8px; }
+  hr { border:none; border-top:1px solid #ddd; margin:12px 0; }
 </style>
 </head>
-<body>
 
+<body>
 <h2>HSM Schedule → Calendar</h2>
+<div class="sub">Upload PDF • Finds all BRAWER events • Downloads one .ics</div>
 
 <input type="file" id="pdfUpload" accept="application/pdf">
+
+<div id="dateFallback" style="display:none;">
+  <div class="card warn">
+    <strong>Couldn’t auto-detect the schedule date.</strong>
+    <div class="small">Select it manually and run again.</div>
+    <input type="date" id="manualDate" />
+  </div>
+</div>
+
 <button onclick="processPDF()">Generate .ics</button>
 
 <div id="result"></div>
@@ -32,31 +54,25 @@ const LAST_NAME = "BRAWER";
 
 // ---------- helpers ----------
 function normalizeSpaces(s){
-  return String(s).replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+  return String(s)
+    .replace(/\u00A0/g, " ") // NBSP
+    .replace(/\s+/g, " ")
+    .trim();
 }
-function cleanAlpha(s){
-  return String(s).toUpperCase().replace(/[^A-Z]/g, "");
-}
-function cleanDigits(s){
-  return String(s).replace(/[^\d]/g, "");
-}
+
 function yBucket(y){ return Math.round(y / 3) * 3; }
 function isValidTime(t){ return /^[0-2]\d[0-5]\d$/.test(t); }
+
 function uniqBy(arr, keyFn){
-  const seen = new Set(); const out = [];
-  for (const x of arr){ const k = keyFn(x); if (!seen.has(k)) { seen.add(k); out.push(x); } }
+  const seen = new Set();
+  const out = [];
+  for (const x of arr){
+    const k = keyFn(x);
+    if (!seen.has(k)){ seen.add(k); out.push(x); }
+  }
   return out;
 }
-function monthIndex(mon){
-  const months = { JAN:0, FEB:1, MAR:2, APR:3, MAY:4, JUN:5, JUL:6, AUG:7, SEP:8, OCT:9, NOV:10, DEC:11 };
-  return (mon in months) ? months[mon] : null;
-}
-function formatICSDate(dateObj, hhmm){
-  const y = dateObj.getFullYear();
-  const m = String(dateObj.getMonth()+1).padStart(2,'0');
-  const d = String(dateObj.getDate()).padStart(2,'0');
-  return `${y}${m}${d}T${hhmm}00`;
-}
+
 function escapeICS(s){
   return String(s)
     .replace(/\\/g, "\\\\")
@@ -64,6 +80,15 @@ function escapeICS(s){
     .replace(/,/g, "\\,")
     .replace(/;/g, "\\;");
 }
+
+// Floating local time; imports cleanly on iOS
+function formatICSDate(dateObj, hhmm){
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth()+1).padStart(2,'0');
+  const d = String(dateObj.getDate()).padStart(2,'0');
+  return `${y}${m}${d}T${hhmm}00`;
+}
+
 function downloadICS(content){
   const blob = new Blob([content], { type: "text/calendar" });
   const link = document.createElement("a");
@@ -71,6 +96,7 @@ function downloadICS(content){
   link.download = "hsm_schedule.ics";
   link.click();
 }
+
 function guessType(rowText){
   const t = rowText.toUpperCase();
   if (t.includes("OFT") || t.includes("WTT") || t.includes("TOFT") || t.includes("SIM")) return "SIM";
@@ -78,100 +104,39 @@ function guessType(rowText){
   return "FLT";
 }
 
-// ---------- NEW: coordinate-based DATE extraction ----------
-function extractScheduleDateFromItems(items){
-  // Build simplified items with coordinates
-  const it = items.map(i => ({
-    s: String(i.str || ""),
-    x: i.transform[4],
-    y: i.transform[5]
-  }));
+// ---------- date extraction (best-effort) ----------
+// Keep it simple: try regex on normalized page text. If it fails, we fall back to manual date.
+function tryExtractScheduleDate(pageText){
+  const t = normalizeSpaces(pageText).toUpperCase();
+  // Accept FEB with weird spacing like F E B
+  const m = t.match(/DATE:\s*(\d{1,2})\s*([A-Z](?:\s*[A-Z]){2}|[A-Z]{3})\s*(\d{4})/);
+  if (!m) return null;
 
-  // Find candidate "DATE" labels
-  const dateLabels = it.filter(o => {
-    const a = cleanAlpha(o.s);
-    return a === "DATE" || a === "DATE" || a === "DATE" || a.startsWith("DATE");
-  });
+  const day = parseInt(m[1], 10);
+  const monRaw = String(m[2]).toUpperCase().replace(/[^A-Z]/g, "");
+  const year = parseInt(m[3], 10);
 
-  // Try each label (in case there are multiple)
-  for (const lab of dateLabels){
-    const y0 = yBucket(lab.y);
+  const months = { JAN:0, FEB:1, MAR:2, APR:3, MAY:4, JUN:5, JUL:6, AUG:7, SEP:8, OCT:9, NOV:10, DEC:11 };
+  if (!(monRaw in months)) return null;
 
-    // same row (within tolerance), to the right of DATE label
-    const row = it
-      .filter(o => Math.abs(yBucket(o.y) - y0) <= 3 && o.x > lab.x)
-      .sort((a,b) => a.x - b.x)
-      .map(o => normalizeSpaces(o.s))
-      .filter(s => s.length);
-
-    if (!row.length) continue;
-
-    // Walk tokens to find: day (1-2 digits), month (3 letters possibly split), year (4 digits)
-    let day = null, mon = null, year = null;
-
-    for (let k = 0; k < row.length; k++){
-      const tok = row[k];
-
-      if (day === null){
-        const d = cleanDigits(tok);
-        if (d.length >= 1 && d.length <= 2){
-          day = parseInt(d, 10);
-          continue;
-        }
-      }
-
-      if (day !== null && mon === null){
-        // month might be "FEB" or "F E B" as separate tokens
-        let m = cleanAlpha(tok);
-
-        if (m.length === 1 && k + 2 < row.length){
-          const m2 = cleanAlpha(row[k+1]);
-          const m3 = cleanAlpha(row[k+2]);
-          if (m2.length === 1 && m3.length === 1){
-            m = (m + m2 + m3);
-            k += 2;
-          }
-        }
-
-        if (m.length === 3 && monthIndex(m) !== null){
-          mon = m;
-          continue;
-        }
-      }
-
-      if (day !== null && mon !== null && year === null){
-        const y = cleanDigits(tok);
-        if (y.length === 4){
-          year = parseInt(y, 10);
-          break;
-        }
-      }
-    }
-
-    if (day && mon && year){
-      const mi = monthIndex(mon);
-      if (mi !== null){
-        // noon avoids DST edge weirdness
-        return new Date(year, mi, day, 12, 0, 0);
-      }
-    }
-  }
-
-  return null;
+  // Noon avoids DST edge cases
+  return new Date(year, months[monRaw], day, 12, 0, 0);
 }
 
-// Fallback regex (sometimes works, keep it)
-function extractScheduleDateFromPageText(pageText){
-  const t = normalizeSpaces(pageText).toUpperCase();
-  // allow "F E B" with spaces
-  const m = t.match(/DATE:\s*(\d{1,2})\s*([A-Z](?:\s*[A-Z]){2})\s*(\d{4})/);
-  if (!m) return null;
-  const day = parseInt(m[1], 10);
-  const mon = cleanAlpha(m[2]);
-  const year = parseInt(m[3], 10);
-  const mi = monthIndex(mon);
-  if (!day || mi === null || !year) return null;
-  return new Date(year, mi, day, 12, 0, 0);
+function getManualDateIfSet(){
+  const el = document.getElementById("manualDate");
+  if (!el || !el.value) return null;
+
+  // input[type=date] returns YYYY-MM-DD
+  const parts = el.value.split("-");
+  if (parts.length !== 3) return null;
+
+  const y = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  const d = parseInt(parts[2], 10);
+  if (!y || !m || !d) return null;
+
+  return new Date(y, m - 1, d, 12, 0, 0);
 }
 
 // ---------- main ----------
@@ -196,13 +161,10 @@ async function processPDF(){
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
 
-    // get date once (prefer coordinate-based)
+    // Attempt auto-date once
     if (!scheduleDate){
-      scheduleDate = extractScheduleDateFromItems(content.items);
-      if (!scheduleDate){
-        const pageText = content.items.map(i => i.str).join(" ");
-        scheduleDate = extractScheduleDateFromPageText(pageText);
-      }
+      const pageText = content.items.map(i => i.str).join(" ");
+      scheduleDate = tryExtractScheduleDate(pageText);
     }
 
     // Row reconstruction by y-position
@@ -224,13 +186,24 @@ async function processPDF(){
     }
   }
 
+  // If auto-date failed, use manual date (and show the picker if not already set)
   if (!scheduleDate){
-    resultEl.innerHTML =
-      `<div class="card err">
-        <strong>Could not find/parse schedule DATE.</strong>
-        <div class="small">If you want, I can add a debug panel that shows the header tokens your phone sees.</div>
-      </div>`;
-    return;
+    const fallback = document.getElementById("dateFallback");
+    fallback.style.display = "block";
+
+    const manual = getManualDateIfSet();
+    if (!manual){
+      resultEl.innerHTML =
+        `<div class="card err">
+          <strong>Could not parse schedule DATE.</strong>
+          <div class="small">Pick the date above, then press “Generate .ics” again.</div>
+        </div>`;
+      return;
+    }
+    scheduleDate = manual;
+  } else {
+    // Hide picker if we successfully auto-parsed
+    document.getElementById("dateFallback").style.display = "none";
   }
 
   if (!candidates.length){
@@ -287,12 +260,11 @@ async function processPDF(){
     resultEl.innerHTML =
       `<div class="card err">
         <strong>Found your name, but couldn’t parse any times.</strong>
-        <div class="small">If this happens again, send me the PDF and I’ll tune the patterns.</div>
       </div>`;
     return;
   }
 
-  // Build ICS
+  // Build one ICS with all events
   let ics = "BEGIN:VCALENDAR\nVERSION:2.0\n";
   for (const e of events){
     ics += "BEGIN:VEVENT\n";
@@ -306,11 +278,12 @@ async function processPDF(){
 
   downloadICS(ics);
 
-  // Preview (useful when you're listed twice)
+  // Preview list
+  const dateLabel = scheduleDate.toDateString();
   let html = `<div class="card">
-    <strong>${events.length} event(s) generated.</strong>
-    <div class="small">Downloaded: hsm_schedule.ics</div>
-    <hr style="border:none;border-top:1px solid #ddd;margin:12px 0;">
+    <div><span class="pill">${dateLabel}</span><span class="pill">${events.length} event(s)</span></div>
+    <div class="small">Downloaded: <strong>hsm_schedule.ics</strong></div>
+    <hr>
   `;
   for (const e of events){
     html += `<div style="margin-bottom:10px;">
