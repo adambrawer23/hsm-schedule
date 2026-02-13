@@ -9,7 +9,6 @@
   body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 18px; text-align: center; }
   h2 { margin: 8px 0 0; }
   .sub { color: #555; margin: 6px 0 18px; font-size: 14px; }
-
   button {
     padding: 14px; font-size: 16px; width: 100%;
     margin-top: 12px; border-radius: 12px; border: none;
@@ -21,7 +20,6 @@
     border-radius: 12px; border: 1px solid #ccc;
     margin-top: 10px;
   }
-
   .card { margin-top: 14px; padding: 14px; border-radius: 14px; background: #f2f2f7; text-align: left; }
   .err { background: #ffecec; }
   .warn { background: #fff4dd; }
@@ -54,10 +52,7 @@ const LAST_NAME = "BRAWER";
 
 // ---------- helpers ----------
 function normalizeSpaces(s){
-  return String(s)
-    .replace(/\u00A0/g, " ") // NBSP
-    .replace(/\s+/g, " ")
-    .trim();
+  return String(s).replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function yBucket(y){ return Math.round(y / 3) * 3; }
@@ -104,38 +99,61 @@ function guessType(rowText){
   return "FLT";
 }
 
-// ---------- date extraction (best-effort) ----------
-// Keep it simple: try regex on normalized page text. If it fails, we fall back to manual date.
-function tryExtractScheduleDate(pageText){
+// ---------- DATE parsing ----------
+function tryExtractDateFromDATE(pageText){
   const t = normalizeSpaces(pageText).toUpperCase();
-  // Accept FEB with weird spacing like F E B
+  // Allow FEB with weird spacing like F E B
   const m = t.match(/DATE:\s*(\d{1,2})\s*([A-Z](?:\s*[A-Z]){2}|[A-Z]{3})\s*(\d{4})/);
   if (!m) return null;
 
   const day = parseInt(m[1], 10);
-  const monRaw = String(m[2]).toUpperCase().replace(/[^A-Z]/g, "");
+  const mon = String(m[2]).toUpperCase().replace(/[^A-Z]/g, "");
   const year = parseInt(m[3], 10);
 
   const months = { JAN:0, FEB:1, MAR:2, APR:3, MAY:4, JUN:5, JUL:6, AUG:7, SEP:8, OCT:9, NOV:10, DEC:11 };
-  if (!(monRaw in months)) return null;
+  if (!(mon in months)) return null;
 
-  // Noon avoids DST edge cases
-  return new Date(year, months[monRaw], day, 12, 0, 0);
+  return new Date(year, months[mon], day, 12, 0, 0);
+}
+
+// NEW: JULIAN parsing. Format is YDDD (e.g., 6044 for 13 FEB 2026).
+function tryExtractDateFromJULIAN(pageText){
+  const t = normalizeSpaces(pageText).toUpperCase();
+  const m = t.match(/JULIAN:\s*(\d{4})/);
+  if (!m) return null;
+
+  const jul = m[1];     // e.g. "6044"
+  const yDigit = parseInt(jul[0], 10);
+  const doy = parseInt(jul.slice(1), 10); // 044
+
+  if (!Number.isFinite(yDigit) || !Number.isFinite(doy) || doy < 1 || doy > 366) return null;
+
+  // Pick the closest full year matching that last digit (usually within this decade)
+  const now = new Date();
+  const currentYear = now.getFullYear();          // e.g. 2026
+  const decadeBase = Math.floor(currentYear / 10) * 10; // 2020
+
+  const candidate1 = decadeBase + yDigit;         // 2026
+  const candidate2 = decadeBase - 10 + yDigit;    // 2016
+  const candidate3 = decadeBase + 10 + yDigit;    // 2036
+
+  function dist(y){ return Math.abs(y - currentYear); }
+  let year = candidate1;
+  if (dist(candidate2) < dist(year)) year = candidate2;
+  if (dist(candidate3) < dist(year)) year = candidate3;
+
+  // Convert day-of-year to date (local)
+  const d = new Date(year, 0, 1, 12, 0, 0); // Jan 1 noon
+  d.setDate(d.getDate() + (doy - 1));
+  return d;
 }
 
 function getManualDateIfSet(){
   const el = document.getElementById("manualDate");
   if (!el || !el.value) return null;
-
-  // input[type=date] returns YYYY-MM-DD
-  const parts = el.value.split("-");
-  if (parts.length !== 3) return null;
-
-  const y = parseInt(parts[0], 10);
-  const m = parseInt(parts[1], 10);
-  const d = parseInt(parts[2], 10);
+  const [yy, mm, dd] = el.value.split("-");
+  const y = parseInt(yy, 10), m = parseInt(mm, 10), d = parseInt(dd, 10);
   if (!y || !m || !d) return null;
-
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
@@ -161,10 +179,10 @@ async function processPDF(){
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
 
-    // Attempt auto-date once
+    // Try to parse date once from any page (header is usually page 1)
     if (!scheduleDate){
       const pageText = content.items.map(i => i.str).join(" ");
-      scheduleDate = tryExtractScheduleDate(pageText);
+      scheduleDate = tryExtractDateFromDATE(pageText) || tryExtractDateFromJULIAN(pageText);
     }
 
     // Row reconstruction by y-position
@@ -186,23 +204,20 @@ async function processPDF(){
     }
   }
 
-  // If auto-date failed, use manual date (and show the picker if not already set)
+  // Manual fallback if both DATE and JULIAN failed
   if (!scheduleDate){
-    const fallback = document.getElementById("dateFallback");
-    fallback.style.display = "block";
-
+    document.getElementById("dateFallback").style.display = "block";
     const manual = getManualDateIfSet();
     if (!manual){
       resultEl.innerHTML =
         `<div class="card err">
-          <strong>Could not parse schedule DATE.</strong>
+          <strong>Could not parse schedule DATE or JULIAN.</strong>
           <div class="small">Pick the date above, then press “Generate .ics” again.</div>
         </div>`;
       return;
     }
     scheduleDate = manual;
   } else {
-    // Hide picker if we successfully auto-parsed
     document.getElementById("dateFallback").style.display = "none";
   }
 
