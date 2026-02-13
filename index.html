@@ -270,8 +270,22 @@ async function processPDF(){
       continue;
     }
 
-    // CLASS/ground style: 0700-1300
-    const rangeMatch = row.match(/\b(\d{4})\s*-\s*(\d{4})\b/);
+  // Detect class / ground events automatically
+if (times.length === 2){
+
+    const start = times[0];
+    const end = times[1];
+
+    events.push({
+        summary: `CLASS – ${row.substring(0, 70)}${row.length > 70 ? "..." : ""}`,
+        description: row,
+        start,
+        end
+    });
+
+    continue;
+}
+
     if (rangeMatch && isValidTime(rangeMatch[1]) && isValidTime(rangeMatch[2])){
       events.push({
         summary: `CLASS – ${row.substring(0, 70)}${row.length > 70 ? "..." : ""}`,
@@ -331,3 +345,4 @@ document.addEventListener("DOMContentLoaded", () => {
 
 </body>
 </html>
+
