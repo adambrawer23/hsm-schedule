@@ -57,7 +57,6 @@
 <div id="result"></div>
 
 <script>
-/** Ensure worker is set (prevents silent failures on some browsers) */
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
 
@@ -67,21 +66,13 @@ const LAST_NAME = "BRAWER";
 function normalizeSpaces(s){
   return String(s).replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 }
-
-// Wider bucket reduces “line split” issues
 function yBucket(y){ return Math.round(y / 5) * 5; }
-
 function isValidTime(t){ return /^[0-2]\d[0-5]\d$/.test(t); }
-
 function uniqBy(arr, keyFn){
   const seen = new Set(); const out = [];
-  for (const x of arr){
-    const k = keyFn(x);
-    if (!seen.has(k)){ seen.add(k); out.push(x); }
-  }
+  for (const x of arr){ const k = keyFn(x); if (!seen.has(k)) { seen.add(k); out.push(x); } }
   return out;
 }
-
 function escapeICS(s){
   return String(s)
     .replace(/\\/g, "\\\\")
@@ -89,22 +80,18 @@ function escapeICS(s){
     .replace(/,/g, "\\,")
     .replace(/;/g, "\\;");
 }
-
-// Floating local time; imports cleanly on iOS
 function formatICSDate(dateObj, hhmm){
   const y = dateObj.getFullYear();
   const m = String(dateObj.getMonth()+1).padStart(2,'0');
   const d = String(dateObj.getDate()).padStart(2,'0');
   return `${y}${m}${d}T${hhmm}00`;
 }
-
 function guessType(rowText){
   const t = rowText.toUpperCase();
   if (t.includes("OFT") || t.includes("WTT") || t.includes("TOFT") || t.includes("SIM")) return "SIM";
   if (t.includes("ICW") || t.includes("CAI") || t.includes("IGR") || t.includes("IMATT") || t.includes("CRT") || t.includes("EXAM") || t.includes("LAB")) return "CLASS";
   return "FLT";
 }
-
 function showDownloadLink(icsText){
   const blob = new Blob([icsText], { type: "text/calendar" });
   const url = URL.createObjectURL(blob);
@@ -126,7 +113,6 @@ function tryExtractDateFromDATE(pageText){
 
   return new Date(year, months[mon], day, 12, 0, 0);
 }
-
 function tryExtractDateFromJULIAN(pageText){
   const t = normalizeSpaces(pageText).toUpperCase();
   const m = t.match(/JULIAN:\s*(\d{4})/);
@@ -135,7 +121,6 @@ function tryExtractDateFromJULIAN(pageText){
   const jul = m[1];
   const yDigit = parseInt(jul[0], 10);
   const doy = parseInt(jul.slice(1), 10);
-
   if (!Number.isFinite(yDigit) || !Number.isFinite(doy) || doy < 1 || doy > 366) return null;
 
   const now = new Date();
@@ -155,33 +140,67 @@ function tryExtractDateFromJULIAN(pageText){
   d.setDate(d.getDate() + (doy - 1));
   return d;
 }
-
 function getManualDate(){
   const el = document.getElementById("manualDate");
   if (!el || !el.value) return null;
-
-  const parts = el.value.split("-");
-  if (parts.length !== 3) return null;
-
-  const y = parseInt(parts[0], 10);
-  const m = parseInt(parts[1], 10);
-  const d = parseInt(parts[2], 10);
+  const [yy, mm, dd] = el.value.split("-");
+  const y = parseInt(yy, 10), m = parseInt(mm, 10), d = parseInt(dd, 10);
   if (!y || !m || !d) return null;
-
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
-// ---------- core parsing ----------
-function extractTimes(rowText){
-  // Extract clean 4-digit time tokens
-  const times = (rowText.match(/\b\d{4}\b/g) || []).filter(isValidTime);
-  return times;
+// ---------- time extraction nearest your name ----------
+// We only ever WANT times closest to "... BRAWER" to avoid grabbing other nearby times.
+function extractTimesWithPositions(text){
+  const out = [];
+  const re = /\b\d{4}\b/g;
+  let m;
+  while ((m = re.exec(text)) !== null){
+    const t = m[0];
+    if (isValidTime(t)) out.push({ t, idx: m.index });
+  }
+  return out;
 }
 
-function parseRowToEvent(rowText){
-  const times = extractTimes(rowText);
+function pickTimesNearestName(text, nameUpper, count){
+  const upper = text.toUpperCase();
+  const nameIdx = upper.lastIndexOf(nameUpper);
+  if (nameIdx === -1) return [];
 
-  // SIM/FLT: BRF ETD ETA (3+ times)
+  const times = extractTimesWithPositions(text);
+  if (!times.length) return [];
+
+  // Prefer times that appear BEFORE the name (most skeds end with instructor)
+  const before = times.filter(x => x.idx < nameIdx);
+  const candidates = before.length ? before : times;
+
+  // Sort by distance to name, then keep closest N, then sort chronologically by position
+  const closest = candidates
+    .map(x => ({...x, dist: Math.abs(nameIdx - x.idx)}))
+    .sort((a,b) => a.dist - b.dist)
+    .slice(0, count)
+    .sort((a,b) => a.idx - b.idx)
+    .map(x => x.t);
+
+  return closest;
+}
+
+// ---------- parse row ----------
+function parseRowToEvent(rowText, fallbackContextText){
+  // rowText is ALWAYS the row containing BRAWER (this is what you want in NOTES)
+  const type = guessType(rowText);
+
+  // First try to extract times from the row itself (best case)
+  let times = pickTimesNearestName(rowText, LAST_NAME, 3);
+
+  // If not enough times (PDF split line), borrow from fallbackContextText,
+  // but STILL keep NOTES as rowText, and pick times nearest the name there too.
+  if (times.length < 2 && fallbackContextText){
+    const borrowed = pickTimesNearestName(fallbackContextText, LAST_NAME, 3);
+    if (borrowed.length > times.length) times = borrowed;
+  }
+
+  // SIM/FLT: need 3 times (BRF ETD ETA)
   if (times.length >= 3){
     const brf = times[0];
     const eta = times[2];
@@ -192,21 +211,22 @@ function parseRowToEvent(rowText){
     const nameMatch = rowText.match(/^\s*\d+\s+(.*?)(?=\s+\d{4}\b)/);
     const evtName = nameMatch ? nameMatch[1].trim() : "Event";
 
-    const type = guessType(rowText);
-
     return {
       summary: `${type} ${evtNumber} – ${evtName}`.replace(/\s+/g," ").trim(),
-      description: rowText,
+      description: rowText,        // EXACTLY the row containing your name
       start: brf,
       end: eta
     };
   }
 
-  // CLASS/Ground: exactly 2 times
+  // CLASS/Ground: need 2 times (START END)
   if (times.length === 2){
+    // Keep title short/clean; notes will have the full row line
+    const shortTitle = rowText.length > 50 ? rowText.slice(0, 50).trim() + "…" : rowText;
+
     return {
-      summary: `CLASS – ${rowText.substring(0, 70)}${rowText.length > 70 ? "..." : ""}`,
-      description: rowText,
+      summary: `CLASS – ${shortTitle}`,
+      description: rowText,        // EXACTLY the row containing your name
       start: times[0],
       end: times[1]
     };
@@ -247,7 +267,7 @@ async function processPDF(){
         scheduleDate = tryExtractDateFromDATE(pageText) || tryExtractDateFromJULIAN(pageText);
       }
 
-      // Build rows keyed by y, but keep y for neighborhood merging
+      // Build rows keyed by y, keep y + text
       const rows = {};
       for (const item of content.items){
         const y = yBucket(item.transform[5]);
@@ -255,10 +275,9 @@ async function processPDF(){
         rows[y].push(item);
       }
 
-      // Create sorted row list
       const rowList = Object.keys(rows)
         .map(k => parseInt(k,10))
-        .sort((a,b) => b - a) // top-to-bottom-ish
+        .sort((a,b) => b - a)
         .map(y => {
           const text = normalizeSpaces(
             rows[y].sort((a,b)=>a.transform[4]-b.transform[4]).map(i=>i.str).join(" ")
@@ -266,31 +285,27 @@ async function processPDF(){
           return { y, text };
         });
 
-      // For every row that contains your name, also merge nearby rows to catch split lines.
+      // Only rows that contain your name are eligible.
       for (let i = 0; i < rowList.length; i++){
-        const rt = rowList[i].text;
-        if (!rt.toUpperCase().includes(LAST_NAME)) continue;
+        const row = rowList[i].text;
+        if (!row.toUpperCase().includes(LAST_NAME)) continue;
 
-        // Merge neighborhood within +/- 10 y-units (~two "buckets")
+        // Context text is row + very near neighbors to borrow times if the row got split
         const y0 = rowList[i].y;
-        const neighborhood = rowList
+        const context = rowList
           .filter(r => Math.abs(r.y - y0) <= 10)
           .map(r => r.text)
-          .filter(t => t.length);
+          .filter(t => t.length)
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
 
-        // Combine (dedupe identical fragments)
-        const combined = [...new Set(neighborhood)].join(" ").replace(/\s+/g," ").trim();
-
-        const evt = parseRowToEvent(combined);
+        const evt = parseRowToEvent(row, context);
         if (evt) events.push(evt);
-
-        // ALSO try the raw row in case it parses better than the combined
-        const evt2 = parseRowToEvent(rt);
-        if (evt2) events.push(evt2);
       }
     }
 
-    // Date handling
+    // Date handling (manual fallback)
     if (!scheduleDate){
       fallbackEl.style.display = "block";
       const manual = getManualDate();
@@ -307,14 +322,13 @@ async function processPDF(){
       fallbackEl.style.display = "none";
     }
 
-    // Dedup events
-    events = uniqBy(events, e => `${e.summary}|${e.start}|${e.end}`);
+    // Dedup
+    events = uniqBy(events, e => `${e.summary}|${e.start}|${e.end}|${e.description}`);
 
     if (!events.length){
       resultEl.innerHTML =
         `<div class="card err">
           <strong>No events parsed for ${LAST_NAME}.</strong>
-          <div class="small">If you want, I can add a debug panel that shows the exact rows it matched.</div>
         </div>`;
       return;
     }
@@ -331,11 +345,11 @@ async function processPDF(){
     }
     ics += "END:VCALENDAR";
 
-    // Render preview + reliable download link
+    // Preview + download
     const dateLabel = scheduleDate.toDateString();
     let html = `<div class="card">
       <div><span class="pill">${dateLabel}</span><span class="pill">${events.length} event(s)</span></div>
-      <div class="small">Tap to download (this works even when auto-download is blocked):</div>
+      <div class="small">Tap to download:</div>
       ${showDownloadLink(ics)}
       <hr>
     `;
@@ -343,6 +357,7 @@ async function processPDF(){
       html += `<div style="margin-bottom:10px;">
         <div><strong>${e.summary}</strong></div>
         <div class="small">${e.start}–${e.end}</div>
+        <div class="small">Notes: ${e.description}</div>
       </div>`;
     }
     html += `</div>`;
