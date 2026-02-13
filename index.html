@@ -47,7 +47,7 @@
 <div id="dateFallback" style="display:none;">
   <div class="card warn">
     <strong>Couldn’t auto-detect the schedule date.</strong>
-    <div class="small">Confirm/edit the date below, then press “Generate .ics”.</div>
+    <div class="small">Select the date below, then press “Generate .ics” again.</div>
     <input type="date" id="manualDate" />
   </div>
 </div>
@@ -67,13 +67,21 @@ const LAST_NAME = "BRAWER";
 function normalizeSpaces(s){
   return String(s).replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 }
-function yBucket(y){ return Math.round(y / 3) * 3; }
+
+// Wider bucket reduces “line split” issues
+function yBucket(y){ return Math.round(y / 5) * 5; }
+
 function isValidTime(t){ return /^[0-2]\d[0-5]\d$/.test(t); }
+
 function uniqBy(arr, keyFn){
   const seen = new Set(); const out = [];
-  for (const x of arr){ const k = keyFn(x); if (!seen.has(k)) { seen.add(k); out.push(x); } }
+  for (const x of arr){
+    const k = keyFn(x);
+    if (!seen.has(k)){ seen.add(k); out.push(x); }
+  }
   return out;
 }
+
 function escapeICS(s){
   return String(s)
     .replace(/\\/g, "\\\\")
@@ -81,17 +89,26 @@ function escapeICS(s){
     .replace(/,/g, "\\,")
     .replace(/;/g, "\\;");
 }
+
+// Floating local time; imports cleanly on iOS
 function formatICSDate(dateObj, hhmm){
   const y = dateObj.getFullYear();
   const m = String(dateObj.getMonth()+1).padStart(2,'0');
   const d = String(dateObj.getDate()).padStart(2,'0');
   return `${y}${m}${d}T${hhmm}00`;
 }
+
 function guessType(rowText){
   const t = rowText.toUpperCase();
   if (t.includes("OFT") || t.includes("WTT") || t.includes("TOFT") || t.includes("SIM")) return "SIM";
   if (t.includes("ICW") || t.includes("CAI") || t.includes("IGR") || t.includes("IMATT") || t.includes("CRT") || t.includes("EXAM") || t.includes("LAB")) return "CLASS";
   return "FLT";
+}
+
+function showDownloadLink(icsText){
+  const blob = new Blob([icsText], { type: "text/calendar" });
+  const url = URL.createObjectURL(blob);
+  return `<a class="dl" href="${url}" download="hsm_schedule.ics">Download .ics</a>`;
 }
 
 // ---------- date parsing ----------
@@ -115,7 +132,7 @@ function tryExtractDateFromJULIAN(pageText){
   const m = t.match(/JULIAN:\s*(\d{4})/);
   if (!m) return null;
 
-  const jul = m[1];          // e.g. 6044
+  const jul = m[1];
   const yDigit = parseInt(jul[0], 10);
   const doy = parseInt(jul.slice(1), 10);
 
@@ -139,25 +156,9 @@ function tryExtractDateFromJULIAN(pageText){
   return d;
 }
 
-function setManualDateDefaultToTomorrowIfEmpty(){
-  const el = document.getElementById("manualDate");
-  if (!el || el.value) return;
-
-  const t = new Date();
-  t.setDate(t.getDate() + 1);
-
-  const yyyy = t.getFullYear();
-  const mm = String(t.getMonth() + 1).padStart(2, "0");
-  const dd = String(t.getDate()).padStart(2, "0");
-  el.value = `${yyyy}-${mm}-${dd}`;
-}
-
 function getManualDate(){
   const el = document.getElementById("manualDate");
-  if (!el) return null;
-
-  // If the picker isn't visible yet, still allow a value if it exists
-  if (!el.value) return null;
+  if (!el || !el.value) return null;
 
   const parts = el.value.split("-");
   if (parts.length !== 3) return null;
@@ -170,12 +171,48 @@ function getManualDate(){
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
-function showDownloadLink(icsText){
-  const blob = new Blob([icsText], { type: "text/calendar" });
-  const url = URL.createObjectURL(blob);
+// ---------- core parsing ----------
+function extractTimes(rowText){
+  // Extract clean 4-digit time tokens
+  const times = (rowText.match(/\b\d{4}\b/g) || []).filter(isValidTime);
+  return times;
+}
 
-  // Return a link the user can tap (reliable everywhere)
-  return `<a class="dl" href="${url}" download="hsm_schedule.ics">Download .ics</a>`;
+function parseRowToEvent(rowText){
+  const times = extractTimes(rowText);
+
+  // SIM/FLT: BRF ETD ETA (3+ times)
+  if (times.length >= 3){
+    const brf = times[0];
+    const eta = times[2];
+
+    const evtNumMatch = rowText.match(/^\s*(\d+)\s+/);
+    const evtNumber = evtNumMatch ? evtNumMatch[1] : "";
+
+    const nameMatch = rowText.match(/^\s*\d+\s+(.*?)(?=\s+\d{4}\b)/);
+    const evtName = nameMatch ? nameMatch[1].trim() : "Event";
+
+    const type = guessType(rowText);
+
+    return {
+      summary: `${type} ${evtNumber} – ${evtName}`.replace(/\s+/g," ").trim(),
+      description: rowText,
+      start: brf,
+      end: eta
+    };
+  }
+
+  // CLASS/Ground: exactly 2 times
+  if (times.length === 2){
+    return {
+      summary: `CLASS – ${rowText.substring(0, 70)}${rowText.length > 70 ? "..." : ""}`,
+      description: rowText,
+      start: times[0],
+      end: times[1]
+    };
+  }
+
+  return null;
 }
 
 // ---------- main ----------
@@ -199,7 +236,7 @@ async function processPDF(){
     const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
 
     let scheduleDate = null;
-    let candidates = [];
+    let events = [];
 
     for (let p = 1; p <= pdf.numPages; p++){
       const page = await pdf.getPage(p);
@@ -210,7 +247,7 @@ async function processPDF(){
         scheduleDate = tryExtractDateFromDATE(pageText) || tryExtractDateFromJULIAN(pageText);
       }
 
-      // Row reconstruction by y-position
+      // Build rows keyed by y, but keep y for neighborhood merging
       const rows = {};
       for (const item of content.items){
         const y = yBucket(item.transform[5]);
@@ -218,91 +255,66 @@ async function processPDF(){
         rows[y].push(item);
       }
 
-      for (const y of Object.keys(rows)){
-        const rowText = normalizeSpaces(
-          rows[y].sort((a,b)=>a.transform[4]-b.transform[4]).map(i=>i.str).join(" ")
-        );
+      // Create sorted row list
+      const rowList = Object.keys(rows)
+        .map(k => parseInt(k,10))
+        .sort((a,b) => b - a) // top-to-bottom-ish
+        .map(y => {
+          const text = normalizeSpaces(
+            rows[y].sort((a,b)=>a.transform[4]-b.transform[4]).map(i=>i.str).join(" ")
+          );
+          return { y, text };
+        });
 
-        if (rowText.toUpperCase().includes(LAST_NAME)){
-          candidates.push(rowText);
-        }
+      // For every row that contains your name, also merge nearby rows to catch split lines.
+      for (let i = 0; i < rowList.length; i++){
+        const rt = rowList[i].text;
+        if (!rt.toUpperCase().includes(LAST_NAME)) continue;
+
+        // Merge neighborhood within +/- 10 y-units (~two "buckets")
+        const y0 = rowList[i].y;
+        const neighborhood = rowList
+          .filter(r => Math.abs(r.y - y0) <= 10)
+          .map(r => r.text)
+          .filter(t => t.length);
+
+        // Combine (dedupe identical fragments)
+        const combined = [...new Set(neighborhood)].join(" ").replace(/\s+/g," ").trim();
+
+        const evt = parseRowToEvent(combined);
+        if (evt) events.push(evt);
+
+        // ALSO try the raw row in case it parses better than the combined
+        const evt2 = parseRowToEvent(rt);
+        if (evt2) events.push(evt2);
       }
     }
 
-    // If auto-date failed, enable manual picker and ALSO proceed if the user has picked a date
+    // Date handling
     if (!scheduleDate){
       fallbackEl.style.display = "block";
-      setManualDateDefaultToTomorrowIfEmpty();
-
       const manual = getManualDate();
-      if (manual){
-        scheduleDate = manual; // proceed on same click
-      } else {
+      if (!manual){
         resultEl.innerHTML =
           `<div class="card err">
             <strong>Could not parse schedule DATE/JULIAN.</strong>
-            <div class="small">Pick/confirm the date above, then press “Generate .ics”.</div>
+            <div class="small">Select the date above, then press “Generate .ics” again.</div>
           </div>`;
         return;
       }
+      scheduleDate = manual;
     } else {
       fallbackEl.style.display = "none";
     }
 
-    if (!candidates.length){
-      resultEl.innerHTML =
-        `<div class="card err">
-          <strong>No rows found for ${LAST_NAME}.</strong>
-        </div>`;
-      return;
-    }
-
-    // Extract events
-    let events = [];
-
-    for (const row of candidates){
-      const times = (row.match(/\b\d{4}\b/g) || []).filter(isValidTime);
-
-      // SIM/FLT style rows: BRF ETD ETA
-      if (times.length >= 3){
-        const brf = times[0];
-        const eta = times[2];
-
-        const evtNumMatch = row.match(/^\s*(\d+)\s+/);
-        const evtNumber = evtNumMatch ? evtNumMatch[1] : "";
-
-        const nameMatch = row.match(/^\s*\d+\s+(.*?)(?=\s+\d{4}\b)/);
-        const evtName = nameMatch ? nameMatch[1].trim() : "Event";
-
-        const type = guessType(row);
-
-        events.push({
-          summary: `${type} ${evtNumber} – ${evtName}`.replace(/\s+/g," ").trim(),
-          description: row,
-          start: brf,
-          end: eta
-        });
-        continue;
-      }
-
-      // CLASS/ground events: exactly 2 times (more robust than relying on hyphen)
-      if (times.length === 2){
-        events.push({
-          summary: `CLASS – ${row.substring(0, 70)}${row.length > 70 ? "..." : ""}`,
-          description: row,
-          start: times[0],
-          end: times[1]
-        });
-        continue;
-      }
-    }
-
+    // Dedup events
     events = uniqBy(events, e => `${e.summary}|${e.start}|${e.end}`);
 
     if (!events.length){
       resultEl.innerHTML =
         `<div class="card err">
-          <strong>Found your name, but couldn’t parse any times.</strong>
+          <strong>No events parsed for ${LAST_NAME}.</strong>
+          <div class="small">If you want, I can add a debug panel that shows the exact rows it matched.</div>
         </div>`;
       return;
     }
@@ -319,11 +331,11 @@ async function processPDF(){
     }
     ics += "END:VCALENDAR";
 
-    // Show a reliable download link (and try auto-download too)
+    // Render preview + reliable download link
     const dateLabel = scheduleDate.toDateString();
     let html = `<div class="card">
       <div><span class="pill">${dateLabel}</span><span class="pill">${events.length} event(s)</span></div>
-      <div class="small">If the download doesn’t start automatically, tap the button below.</div>
+      <div class="small">Tap to download (this works even when auto-download is blocked):</div>
       ${showDownloadLink(ics)}
       <hr>
     `;
@@ -336,15 +348,6 @@ async function processPDF(){
     html += `</div>`;
     resultEl.innerHTML = html;
 
-    // Best-effort auto download (some browsers block it; link above always works)
-    try {
-      const blob = new Blob([ics], { type: "text/calendar" });
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = "hsm_schedule.ics";
-      link.click();
-    } catch (_) {}
-
   } catch (err) {
     resultEl.innerHTML =
       `<div class="card err">
@@ -355,11 +358,6 @@ async function processPDF(){
     goBtn.disabled = false;
   }
 }
-
-// Prefill manual date to tomorrow so if auto-parse fails, it’s already filled
-document.addEventListener("DOMContentLoaded", () => {
-  setManualDateDefaultToTomorrowIfEmpty();
-});
 </script>
 
 </body>
