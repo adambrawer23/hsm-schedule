@@ -38,7 +38,7 @@
 <div id="dateFallback" style="display:none;">
   <div class="card warn">
     <strong>Couldn’t auto-detect the schedule date.</strong>
-    <div class="small">Select it manually and run again.</div>
+    <div class="small">Confirm/edit the date below, then press “Generate .ics” again.</div>
     <input type="date" id="manualDate" />
   </div>
 </div>
@@ -116,7 +116,7 @@ function tryExtractDateFromDATE(pageText){
   return new Date(year, months[mon], day, 12, 0, 0);
 }
 
-// NEW: JULIAN parsing. Format is YDDD (e.g., 6044 for 13 FEB 2026).
+// JULIAN parsing. Format is YDDD (e.g., 6044 for 13 FEB 2026).
 function tryExtractDateFromJULIAN(pageText){
   const t = normalizeSpaces(pageText).toUpperCase();
   const m = t.match(/JULIAN:\s*(\d{4})/);
@@ -128,22 +128,20 @@ function tryExtractDateFromJULIAN(pageText){
 
   if (!Number.isFinite(yDigit) || !Number.isFinite(doy) || doy < 1 || doy > 366) return null;
 
-  // Pick the closest full year matching that last digit (usually within this decade)
   const now = new Date();
-  const currentYear = now.getFullYear();          // e.g. 2026
-  const decadeBase = Math.floor(currentYear / 10) * 10; // 2020
+  const currentYear = now.getFullYear();
+  const decadeBase = Math.floor(currentYear / 10) * 10;
 
-  const candidate1 = decadeBase + yDigit;         // 2026
-  const candidate2 = decadeBase - 10 + yDigit;    // 2016
-  const candidate3 = decadeBase + 10 + yDigit;    // 2036
+  const candidate1 = decadeBase + yDigit;
+  const candidate2 = decadeBase - 10 + yDigit;
+  const candidate3 = decadeBase + 10 + yDigit;
 
   function dist(y){ return Math.abs(y - currentYear); }
   let year = candidate1;
   if (dist(candidate2) < dist(year)) year = candidate2;
   if (dist(candidate3) < dist(year)) year = candidate3;
 
-  // Convert day-of-year to date (local)
-  const d = new Date(year, 0, 1, 12, 0, 0); // Jan 1 noon
+  const d = new Date(year, 0, 1, 12, 0, 0);
   d.setDate(d.getDate() + (doy - 1));
   return d;
 }
@@ -155,6 +153,21 @@ function getManualDateIfSet(){
   const y = parseInt(yy, 10), m = parseInt(mm, 10), d = parseInt(dd, 10);
   if (!y || !m || !d) return null;
   return new Date(y, m - 1, d, 12, 0, 0);
+}
+
+function setManualDateDefaultToTomorrowIfEmpty(){
+  const el = document.getElementById("manualDate");
+  if (!el) return;
+  if (el.value) return; // don't overwrite if user already set it
+
+  const t = new Date();
+  t.setDate(t.getDate() + 1);
+
+  // input[type=date] expects YYYY-MM-DD
+  const yyyy = t.getFullYear();
+  const mm = String(t.getMonth() + 1).padStart(2, "0");
+  const dd = String(t.getDate()).padStart(2, "0");
+  el.value = `${yyyy}-${mm}-${dd}`;
 }
 
 // ---------- main ----------
@@ -179,13 +192,11 @@ async function processPDF(){
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
 
-    // Try to parse date once from any page (header is usually page 1)
     if (!scheduleDate){
       const pageText = content.items.map(i => i.str).join(" ");
       scheduleDate = tryExtractDateFromDATE(pageText) || tryExtractDateFromJULIAN(pageText);
     }
 
-    // Row reconstruction by y-position
     const rows = {};
     for (const item of content.items){
       const y = yBucket(item.transform[5]);
@@ -207,12 +218,14 @@ async function processPDF(){
   // Manual fallback if both DATE and JULIAN failed
   if (!scheduleDate){
     document.getElementById("dateFallback").style.display = "block";
+    setManualDateDefaultToTomorrowIfEmpty();
+
     const manual = getManualDateIfSet();
     if (!manual){
       resultEl.innerHTML =
         `<div class="card err">
           <strong>Could not parse schedule DATE or JULIAN.</strong>
-          <div class="small">Pick the date above, then press “Generate .ics” again.</div>
+          <div class="small">Confirm/edit the date above, then press “Generate .ics” again.</div>
         </div>`;
       return;
     }
@@ -309,6 +322,11 @@ async function processPDF(){
   html += `</div>`;
   resultEl.innerHTML = html;
 }
+
+// Nice touch: if the picker becomes visible, prefill tomorrow immediately
+document.addEventListener("DOMContentLoaded", () => {
+  setManualDateDefaultToTomorrowIfEmpty();
+});
 </script>
 
 </body>
