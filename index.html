@@ -30,43 +30,33 @@ input { margin-top: 14px; width: 100%; }
 <script>
 const LAST_NAME = "BRAWER";
 
-// --- helpers ---
+// ---------- helpers ----------
 function normalizeSpaces(s){
-  return String(s)
-    .replace(/\u00A0/g, " ")     // NBSP
-    .replace(/\s+/g, " ")
-    .trim();
+  return String(s).replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 }
-
 function cleanAlpha(s){
   return String(s).toUpperCase().replace(/[^A-Z]/g, "");
 }
-
+function cleanDigits(s){
+  return String(s).replace(/[^\d]/g, "");
+}
 function yBucket(y){ return Math.round(y / 3) * 3; }
 function isValidTime(t){ return /^[0-2]\d[0-5]\d$/.test(t); }
-
 function uniqBy(arr, keyFn){
-  const seen = new Set();
-  const out = [];
-  for (const x of arr){
-    const k = keyFn(x);
-    if (!seen.has(k)){ seen.add(k); out.push(x); }
-  }
+  const seen = new Set(); const out = [];
+  for (const x of arr){ const k = keyFn(x); if (!seen.has(k)) { seen.add(k); out.push(x); } }
   return out;
 }
-
 function monthIndex(mon){
   const months = { JAN:0, FEB:1, MAR:2, APR:3, MAY:4, JUN:5, JUL:6, AUG:7, SEP:8, OCT:9, NOV:10, DEC:11 };
   return (mon in months) ? months[mon] : null;
 }
-
 function formatICSDate(dateObj, hhmm){
   const y = dateObj.getFullYear();
   const m = String(dateObj.getMonth()+1).padStart(2,'0');
   const d = String(dateObj.getDate()).padStart(2,'0');
   return `${y}${m}${d}T${hhmm}00`;
 }
-
 function escapeICS(s){
   return String(s)
     .replace(/\\/g, "\\\\")
@@ -74,7 +64,6 @@ function escapeICS(s){
     .replace(/,/g, "\\,")
     .replace(/;/g, "\\;");
 }
-
 function downloadICS(content){
   const blob = new Blob([content], { type: "text/calendar" });
   const link = document.createElement("a");
@@ -82,33 +71,6 @@ function downloadICS(content){
   link.download = "hsm_schedule.ics";
   link.click();
 }
-
-// NEW: super-robust DATE extractor for PDF.js output
-function extractScheduleDateFromPageText(pageText){
-  // pageText is already normalized
-  // Find "DATE:" then take next 3 tokens as day / month / year.
-  const idx = pageText.toUpperCase().indexOf("DATE:");
-  if (idx === -1) return null;
-
-  const after = normalizeSpaces(pageText.slice(idx + 5)); // everything after "DATE:"
-  const tokens = after.split(" ");
-
-  if (tokens.length < 3) return null;
-
-  const dayStr = tokens[0].replace(/[^\d]/g, "");
-  const monStr = cleanAlpha(tokens[1]);     // handles "F E B" or "F-E-B"
-  const yearStr = tokens[2].replace(/[^\d]/g, "");
-
-  const day = parseInt(dayStr, 10);
-  const year = parseInt(yearStr, 10);
-  const mi = monthIndex(monStr);
-
-  if (!day || !year || mi === null) return null;
-
-  // Noon avoids DST edge weirdness
-  return new Date(year, mi, day, 12, 0, 0);
-}
-
 function guessType(rowText){
   const t = rowText.toUpperCase();
   if (t.includes("OFT") || t.includes("WTT") || t.includes("TOFT") || t.includes("SIM")) return "SIM";
@@ -116,6 +78,103 @@ function guessType(rowText){
   return "FLT";
 }
 
+// ---------- NEW: coordinate-based DATE extraction ----------
+function extractScheduleDateFromItems(items){
+  // Build simplified items with coordinates
+  const it = items.map(i => ({
+    s: String(i.str || ""),
+    x: i.transform[4],
+    y: i.transform[5]
+  }));
+
+  // Find candidate "DATE" labels
+  const dateLabels = it.filter(o => {
+    const a = cleanAlpha(o.s);
+    return a === "DATE" || a === "DATE" || a === "DATE" || a.startsWith("DATE");
+  });
+
+  // Try each label (in case there are multiple)
+  for (const lab of dateLabels){
+    const y0 = yBucket(lab.y);
+
+    // same row (within tolerance), to the right of DATE label
+    const row = it
+      .filter(o => Math.abs(yBucket(o.y) - y0) <= 3 && o.x > lab.x)
+      .sort((a,b) => a.x - b.x)
+      .map(o => normalizeSpaces(o.s))
+      .filter(s => s.length);
+
+    if (!row.length) continue;
+
+    // Walk tokens to find: day (1-2 digits), month (3 letters possibly split), year (4 digits)
+    let day = null, mon = null, year = null;
+
+    for (let k = 0; k < row.length; k++){
+      const tok = row[k];
+
+      if (day === null){
+        const d = cleanDigits(tok);
+        if (d.length >= 1 && d.length <= 2){
+          day = parseInt(d, 10);
+          continue;
+        }
+      }
+
+      if (day !== null && mon === null){
+        // month might be "FEB" or "F E B" as separate tokens
+        let m = cleanAlpha(tok);
+
+        if (m.length === 1 && k + 2 < row.length){
+          const m2 = cleanAlpha(row[k+1]);
+          const m3 = cleanAlpha(row[k+2]);
+          if (m2.length === 1 && m3.length === 1){
+            m = (m + m2 + m3);
+            k += 2;
+          }
+        }
+
+        if (m.length === 3 && monthIndex(m) !== null){
+          mon = m;
+          continue;
+        }
+      }
+
+      if (day !== null && mon !== null && year === null){
+        const y = cleanDigits(tok);
+        if (y.length === 4){
+          year = parseInt(y, 10);
+          break;
+        }
+      }
+    }
+
+    if (day && mon && year){
+      const mi = monthIndex(mon);
+      if (mi !== null){
+        // noon avoids DST edge weirdness
+        return new Date(year, mi, day, 12, 0, 0);
+      }
+    }
+  }
+
+  return null;
+}
+
+// Fallback regex (sometimes works, keep it)
+function extractScheduleDateFromPageText(pageText){
+  const t = normalizeSpaces(pageText).toUpperCase();
+  // allow "F E B" with spaces
+  const m = t.match(/DATE:\s*(\d{1,2})\s*([A-Z](?:\s*[A-Z]){2})\s*(\d{4})/);
+  if (!m) return null;
+  const day = parseInt(m[1], 10);
+  const mon = cleanAlpha(m[2]);
+  const year = parseInt(m[3], 10);
+  const mi = monthIndex(mon);
+  if (!day || mi === null || !year) return null;
+  return new Date(year, mi, day, 12, 0, 0);
+}
+
+// ---------- main ----------
 async function processPDF(){
   const resultEl = document.getElementById("result");
   resultEl.innerHTML = "";
@@ -137,10 +196,13 @@ async function processPDF(){
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
 
-    const pageText = normalizeSpaces(content.items.map(i => i.str).join(" "));
-
+    // get date once (prefer coordinate-based)
     if (!scheduleDate){
-      scheduleDate = extractScheduleDateFromPageText(pageText);
+      scheduleDate = extractScheduleDateFromItems(content.items);
+      if (!scheduleDate){
+        const pageText = content.items.map(i => i.str).join(" ");
+        scheduleDate = extractScheduleDateFromPageText(pageText);
+      }
     }
 
     // Row reconstruction by y-position
@@ -165,8 +227,8 @@ async function processPDF(){
   if (!scheduleDate){
     resultEl.innerHTML =
       `<div class="card err">
-        <strong>Found DATE but could not parse it.</strong>
-        <div class="small">Expected: DATE: 13 FEB 2026</div>
+        <strong>Could not find/parse schedule DATE.</strong>
+        <div class="small">If you want, I can add a debug panel that shows the header tokens your phone sees.</div>
       </div>`;
     return;
   }
@@ -207,7 +269,7 @@ async function processPDF(){
       continue;
     }
 
-    // CLASS/ground style: 0700-1300 (or 1000-1200, etc.)
+    // CLASS/ground style: 0700-1300
     const rangeMatch = row.match(/\b(\d{4})\s*-\s*(\d{4})\b/);
     if (rangeMatch && isValidTime(rangeMatch[1]) && isValidTime(rangeMatch[2])){
       events.push({
@@ -225,7 +287,7 @@ async function processPDF(){
     resultEl.innerHTML =
       `<div class="card err">
         <strong>Found your name, but couldn’t parse any times.</strong>
-        <div class="small">If you want, paste the preview rows and I’ll tune the patterns.</div>
+        <div class="small">If this happens again, send me the PDF and I’ll tune the patterns.</div>
       </div>`;
     return;
   }
@@ -244,7 +306,7 @@ async function processPDF(){
 
   downloadICS(ics);
 
-  // Preview (useful when you’re listed twice)
+  // Preview (useful when you're listed twice)
   let html = `<div class="card">
     <strong>${events.length} event(s) generated.</strong>
     <div class="small">Downloaded: hsm_schedule.ics</div>
