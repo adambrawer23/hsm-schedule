@@ -66,7 +66,16 @@
 </div>
 
 <button id="goBtn" onclick="processPDF()">Generate .ics</button>
-
+<div class="card small" style="margin-top:24px; text-align:left;">
+  <strong>Privacy & Data Handling</strong><br><br>
+  This application is a client-side utility hosted on GitHub Pages. 
+  All PDF processing occurs locally within your browser session.
+  Uploaded schedule files are <strong>not transmitted, stored, logged, or retained</strong> 
+  by any server or third party.
+  <br><br>
+  Once parsing is complete, the file exists only in your browser’s temporary memory 
+  and is discarded when the page is refreshed or closed.
+</div>
 <div id="result"></div>
 
 <script>
@@ -396,3 +405,4 @@ async function processPDF(){
 
 </body>
 </html>
+
