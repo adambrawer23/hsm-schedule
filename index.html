@@ -2,13 +2,13 @@
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HSM Schedule → Calendar</title>
+<title>Squadron Schedule → Calendar (.ics)</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 18px; text-align: center; }
   h2 { margin: 8px 0 0; }
-  .sub { color: #555; margin: 6px 0 18px; font-size: 14px; }
+  .sub { color: #555; margin: 6px 0 18px; font-size: 14px; line-height: 1.35; }
 
   button, a.dl {
     display: inline-block;
@@ -21,7 +21,11 @@
   }
   a.dl { background-color: #34C759; }
 
-  input[type="file"] { margin-top: 14px; width: 100%; }
+  input[type="file"], input[type="text"] { margin-top: 14px; width: 100%; box-sizing: border-box; }
+  input[type="text"]{
+    padding: 12px; font-size: 16px;
+    border-radius: 12px; border: 1px solid #ccc;
+  }
   input[type="date"] {
     width: 100%; padding: 12px; font-size: 16px;
     border-radius: 12px; border: 1px solid #ccc;
@@ -35,13 +39,22 @@
   .small { color:#666; font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
   .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; background:#e8e8ed; font-size: 12px; margin-right: 8px; }
   hr { border:none; border-top:1px solid #ddd; margin:12px 0; }
+  .label { text-align:left; font-size: 13px; color:#444; margin-top: 12px; }
 </style>
 </head>
 
 <body>
-<h2>HSM Schedule → Calendar</h2>
-<div class="sub">Upload PDF • Finds all BRAWER events • Generates one .ics</div>
+<h2>Schedule → Calendar</h2>
+<div class="sub">
+  1) Enter your <strong>LAST NAME</strong> exactly as it appears on the schedule<br>
+  2) Upload the PDF<br>
+  3) Tap <strong>Generate .ics</strong> and import to Calendar
+</div>
 
+<div class="label">Last name (example: BRAWER)</div>
+<input type="text" id="nameInput" placeholder="Type last name…" value="BRAWER" autocapitalize="characters" autocomplete="off">
+
+<div class="label">Schedule PDF</div>
 <input type="file" id="pdfUpload" accept="application/pdf">
 
 <div id="dateFallback" style="display:none;">
@@ -59,8 +72,6 @@
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
-
-const LAST_NAME = "BRAWER";
 
 // ---------- helpers ----------
 function normalizeSpaces(s){
@@ -95,7 +106,7 @@ function guessType(rowText){
 function showDownloadLink(icsText){
   const blob = new Blob([icsText], { type: "text/calendar" });
   const url = URL.createObjectURL(blob);
-  return `<a class="dl" href="${url}" download="hsm_schedule.ics">Download .ics</a>`;
+  return `<a class="dl" href="${url}" download="schedule.ics">Download .ics</a>`;
 }
 
 // ---------- date parsing ----------
@@ -149,8 +160,7 @@ function getManualDate(){
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
-// ---------- time extraction nearest your name ----------
-// We only ever WANT times closest to "... BRAWER" to avoid grabbing other nearby times.
+// ---------- time extraction nearest name ----------
 function extractTimesWithPositions(text){
   const out = [];
   const re = /\b\d{4}\b/g;
@@ -170,11 +180,9 @@ function pickTimesNearestName(text, nameUpper, count){
   const times = extractTimesWithPositions(text);
   if (!times.length) return [];
 
-  // Prefer times that appear BEFORE the name (most skeds end with instructor)
   const before = times.filter(x => x.idx < nameIdx);
   const candidates = before.length ? before : times;
 
-  // Sort by distance to name, then keep closest N, then sort chronologically by position
   const closest = candidates
     .map(x => ({...x, dist: Math.abs(nameIdx - x.idx)}))
     .sort((a,b) => a.dist - b.dist)
@@ -185,22 +193,16 @@ function pickTimesNearestName(text, nameUpper, count){
   return closest;
 }
 
-// ---------- parse row ----------
-function parseRowToEvent(rowText, fallbackContextText){
-  // rowText is ALWAYS the row containing BRAWER (this is what you want in NOTES)
+function parseRowToEvent(rowText, nameUpper, fallbackContextText){
   const type = guessType(rowText);
 
-  // First try to extract times from the row itself (best case)
-  let times = pickTimesNearestName(rowText, LAST_NAME, 3);
-
-  // If not enough times (PDF split line), borrow from fallbackContextText,
-  // but STILL keep NOTES as rowText, and pick times nearest the name there too.
+  let times = pickTimesNearestName(rowText, nameUpper, 3);
   if (times.length < 2 && fallbackContextText){
-    const borrowed = pickTimesNearestName(fallbackContextText, LAST_NAME, 3);
+    const borrowed = pickTimesNearestName(fallbackContextText, nameUpper, 3);
     if (borrowed.length > times.length) times = borrowed;
   }
 
-  // SIM/FLT: need 3 times (BRF ETD ETA)
+  // SIM/FLT: 3+ times
   if (times.length >= 3){
     const brf = times[0];
     const eta = times[2];
@@ -213,20 +215,18 @@ function parseRowToEvent(rowText, fallbackContextText){
 
     return {
       summary: `${type} ${evtNumber} – ${evtName}`.replace(/\s+/g," ").trim(),
-      description: rowText,        // EXACTLY the row containing your name
+      description: rowText,
       start: brf,
       end: eta
     };
   }
 
-  // CLASS/Ground: need 2 times (START END)
+  // CLASS: exactly 2 times
   if (times.length === 2){
-    // Keep title short/clean; notes will have the full row line
-    const shortTitle = rowText.length > 50 ? rowText.slice(0, 50).trim() + "…" : rowText;
-
+    const shortTitle = rowText.length > 60 ? rowText.slice(0, 60).trim() + "…" : rowText;
     return {
       summary: `CLASS – ${shortTitle}`,
-      description: rowText,        // EXACTLY the row containing your name
+      description: rowText,
       start: times[0],
       end: times[1]
     };
@@ -245,6 +245,25 @@ async function processPDF(){
   goBtn.disabled = true;
 
   try {
+    const nameRaw = (document.getElementById("nameInput").value || "").trim();
+    const nameUpper = nameRaw.toUpperCase().replace(/\s+/g, "");
+
+    if (!nameUpper){
+      resultEl.innerHTML =
+        `<div class="card err"><strong>Please enter your last name.</strong></div>`;
+      return;
+    }
+
+    // basic sanity check (avoid people entering full names or random punctuation)
+    if (!/^[A-Z'-]{2,20}$/.test(nameUpper)){
+      resultEl.innerHTML =
+        `<div class="card err">
+          <strong>Last name looks invalid.</strong>
+          <div class="small">Use letters only (example: BRAWER). Hyphen/apostrophe are OK.</div>
+        </div>`;
+      return;
+    }
+
     const fileInput = document.getElementById("pdfUpload");
     if (!fileInput.files.length){
       alert("Upload the schedule PDF.");
@@ -285,12 +304,11 @@ async function processPDF(){
           return { y, text };
         });
 
-      // Only rows that contain your name are eligible.
+      // Only rows that contain the entered name are eligible.
       for (let i = 0; i < rowList.length; i++){
         const row = rowList[i].text;
-        if (!row.toUpperCase().includes(LAST_NAME)) continue;
+        if (!row.toUpperCase().includes(nameUpper)) continue;
 
-        // Context text is row + very near neighbors to borrow times if the row got split
         const y0 = rowList[i].y;
         const context = rowList
           .filter(r => Math.abs(r.y - y0) <= 10)
@@ -300,7 +318,7 @@ async function processPDF(){
           .replace(/\s+/g, " ")
           .trim();
 
-        const evt = parseRowToEvent(row, context);
+        const evt = parseRowToEvent(row, nameUpper, context);
         if (evt) events.push(evt);
       }
     }
@@ -322,13 +340,13 @@ async function processPDF(){
       fallbackEl.style.display = "none";
     }
 
-    // Dedup
     events = uniqBy(events, e => `${e.summary}|${e.start}|${e.end}|${e.description}`);
 
     if (!events.length){
       resultEl.innerHTML =
         `<div class="card err">
-          <strong>No events parsed for ${LAST_NAME}.</strong>
+          <strong>No events found for ${nameUpper}.</strong>
+          <div class="small">Make sure you typed your last name exactly as it appears on the schedule.</div>
         </div>`;
       return;
     }
@@ -349,6 +367,7 @@ async function processPDF(){
     const dateLabel = scheduleDate.toDateString();
     let html = `<div class="card">
       <div><span class="pill">${dateLabel}</span><span class="pill">${events.length} event(s)</span></div>
+      <div class="small">Last name: <strong>${nameUpper}</strong></div>
       <div class="small">Tap to download:</div>
       ${showDownloadLink(ics)}
       <hr>
