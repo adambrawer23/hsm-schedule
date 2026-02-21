@@ -3,6 +3,8 @@
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Schedule → Calendar (.ics)</title>
+
+<!-- pdf.js -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 
 <style>
@@ -49,7 +51,8 @@
 <div class="sub">
   1) Enter your <strong>LAST NAME</strong> exactly as it appears on the schedule<br>
   2) Upload the PDF<br>
-  3) Tap <strong>Generate .ics</strong> and import to Calendar
+  3) Tap <strong>Generate .ics</strong> and import to Calendar<br>
+  <span class="small">All times are locked to <strong>America/Los_Angeles (Pacific Time)</strong>.</span>
 </div>
 
 <div class="label">Last name</div>
@@ -63,8 +66,7 @@
   <div class="card warn">
     <strong>Couldn’t auto-detect day headers (DAY/DATE/JULIAN).</strong>
     <div class="small">
-      Enter the date range covered by this PDF.
-      We’ll assign events in order across that range.
+      Enter the date range covered by this PDF. We’ll assign events in order across that range.
     </div>
 
     <div class="dateGrid">
@@ -78,9 +80,7 @@
       </div>
     </div>
 
-    <div class="small">
-      Then press “Generate .ics” again.
-    </div>
+    <div class="small">Then press “Generate .ics” again.</div>
   </div>
 </div>
 
@@ -100,8 +100,18 @@
 <div id="result"></div>
 
 <script>
+/**
+ * Security & reliability upgrades included:
+ * - Escape HTML in previews (prevents XSS via PDF text / user input)
+ * - PDF size guard (prevents huge-file hang)
+ * - More robust ICS escaping (handles \r\n)
+ * - Locked TZ to America/Los_Angeles with VTIMEZONE + TZID
+ * - Revoke object URLs after a short delay (memory hygiene)
+ */
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+
+const SCHEDULE_TZID = "America/Los_Angeles";
 
 // ---------- helpers ----------
 function normalizeSpaces(s){
@@ -117,9 +127,17 @@ function uniqBy(arr, keyFn){
 function escapeICS(s){
   return String(s)
     .replace(/\\/g, "\\\\")
-    .replace(/\n/g, "\\n")
+    .replace(/\r\n|\r|\n/g, "\\n")
     .replace(/,/g, "\\,")
     .replace(/;/g, "\\;");
+}
+function escapeHTML(s){
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 function formatICSDate(dateObj, hhmm){
   const y = dateObj.getFullYear();
@@ -127,16 +145,20 @@ function formatICSDate(dateObj, hhmm){
   const d = String(dateObj.getDate()).padStart(2,'0');
   return `${y}${m}${d}T${hhmm}00`;
 }
-function showDownloadLink(icsText){
-  const blob = new Blob([icsText], { type: "text/calendar" });
-  const url = URL.createObjectURL(blob);
-  return `<a class="dl" href="${url}" download="schedule.ics">Download .ics</a>`;
-}
 function guessType(rowText){
   const t = rowText.toUpperCase();
   if (t.includes("OFT") || t.includes("WTT") || t.includes("TOFT") || t.includes("SIM")) return "SIM";
   if (t.includes("ICW") || t.includes("CAI") || t.includes("IGR") || t.includes("IMATT") || t.includes("CRT") || t.includes("EXAM") || t.includes("LAB")) return "CLASS";
   return "FLT";
+}
+
+// Returns { html, revoke } so caller can revoke URL later.
+function makeDownloadLink(icsText){
+  const blob = new Blob([icsText], { type: "text/calendar" });
+  const url = URL.createObjectURL(blob);
+  const html = `<a class="dl" href="${url}" download="schedule.ics">Download .ics</a>`;
+  const revoke = () => { try { URL.revokeObjectURL(url); } catch (_) {} };
+  return { html, revoke };
 }
 
 // ---------- date parsing ----------
@@ -254,6 +276,7 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
     if (borrowed.length > times.length) times = borrowed;
   }
 
+  // SIM/FLT: BRF ETD ETA
   if (times.length >= 3){
     const brf = times[0];
     const eta = times[2];
@@ -264,16 +287,65 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
     const nameMatch = rowText.match(/^\s*\d+\s+(.*?)(?=\s+\d{4}\b)/);
     const evtName = nameMatch ? nameMatch[1].trim() : "Event";
 
-    return { date: eventDate, summary: `${type} ${evtNumber} – ${evtName}`.replace(/\s+/g," ").trim(),
-      description: rowText, start: brf, end: eta };
+    return {
+      date: eventDate,
+      summary: `${type} ${evtNumber} – ${evtName}`.replace(/\s+/g," ").trim(),
+      description: rowText,
+      start: brf,
+      end: eta
+    };
   }
 
+  // CLASS/Ground: START END
   if (times.length === 2){
     const shortTitle = rowText.length > 60 ? rowText.slice(0, 60).trim() + "…" : rowText;
-    return { date: eventDate, summary: `CLASS – ${shortTitle}`, description: rowText, start: times[0], end: times[1] };
+    return {
+      date: eventDate,
+      summary: `CLASS – ${shortTitle}`,
+      description: rowText,
+      start: times[0],
+      end: times[1]
+    };
   }
 
   return null;
+}
+
+// ---------- ICS builder (Pacific Time locked) ----------
+function buildICS(events){
+  let ics =
+`BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Squadron Schedule Tool//EN
+CALSCALE:GREGORIAN
+BEGIN:VTIMEZONE
+TZID:${SCHEDULE_TZID}
+BEGIN:STANDARD
+DTSTART:19701101T020000
+RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU
+TZOFFSETFROM:-0700
+TZOFFSETTO:-0800
+END:STANDARD
+BEGIN:DAYLIGHT
+DTSTART:19700308T020000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU
+TZOFFSETFROM:-0800
+TZOFFSETTO:-0700
+END:DAYLIGHT
+END:VTIMEZONE
+`;
+
+  for (const e of events){
+    ics += "BEGIN:VEVENT\n";
+    ics += `SUMMARY:${escapeICS(e.summary)}\n`;
+    ics += `DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}\n`;
+    ics += `DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.end)}\n`;
+    ics += `DESCRIPTION:${escapeICS(e.description)}\n`;
+    ics += "END:VEVENT\n";
+  }
+
+  ics += "END:VCALENDAR";
+  return ics;
 }
 
 // ---------- main ----------
@@ -284,6 +356,12 @@ async function processPDF(){
 
   resultEl.innerHTML = "";
   goBtn.disabled = true;
+
+  // Always start with manual range hidden; only show if needed.
+  fallbackEl.style.display = "none";
+
+  // If we previously created an object URL, revoke it after the user has had time to download.
+  if (window.__lastRevokeDownloadUrl) { try { window.__lastRevokeDownloadUrl(); } catch(_) {} window.__lastRevokeDownloadUrl = null; }
 
   try {
     const nameRaw = (document.getElementById("nameInput").value || "").trim();
@@ -309,14 +387,22 @@ async function processPDF(){
     }
 
     const file = fileInput.files[0];
+
+    // DoS/perf guard
+    const MAX_BYTES = 10 * 1024 * 1024; // 10MB
+    if (file.size > MAX_BYTES){
+      resultEl.innerHTML =
+        `<div class="card err">
+          <strong>PDF too large.</strong>
+          <div class="small">Max allowed size is 10 MB. This prevents the tool from hanging on very large files.</div>
+        </div>`;
+      return;
+    }
+
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
 
     let events = [];
-    let hadAnyParsedDateHeader = false;
-
-    // If headers are unreadable, we still track "sections" (each time we see DAY: we create one)
-    // and later map sections to dates from the manual range.
     let totalUndatedSections = 0;
 
     for (let p = 1; p <= pdf.numPages; p++){
@@ -341,7 +427,7 @@ async function processPDF(){
         });
 
       let currentDateForSection = null;
-      let currentSectionIndex = -1; // for manual mapping if needed
+      let currentSectionIndex = -1;
 
       for (let i = 0; i < rowList.length; i++){
         const rowText = rowList[i].text;
@@ -352,9 +438,8 @@ async function processPDF(){
           const headerDate = parseDateFromHeaderRow(rowText);
           if (headerDate){
             currentDateForSection = headerDate;
-            hadAnyParsedDateHeader = true;
           } else {
-            currentDateForSection = null; // will be mapped later if needed
+            currentDateForSection = null;
             totalUndatedSections = Math.max(totalUndatedSections, currentSectionIndex + 1);
           }
           continue;
@@ -362,6 +447,7 @@ async function processPDF(){
 
         if (!rowText.toUpperCase().includes(nameUpper)) continue;
 
+        // Borrow context only for time recovery, not for notes.
         const y0 = rowList[i].y;
         const context = rowList
           .filter(r => Math.abs(r.y - y0) <= 10)
@@ -373,7 +459,6 @@ async function processPDF(){
 
         const evt = parseRowToEvent(rowText, nameUpper, context, currentDateForSection);
         if (evt){
-          // attach section index if date missing, so we can map later
           evt._sectionIndex = currentSectionIndex;
           events.push(evt);
         }
@@ -383,7 +468,7 @@ async function processPDF(){
     if (!events.length){
       resultEl.innerHTML =
         `<div class="card err">
-          <strong>No events found for ${nameUpper}.</strong>
+          <strong>No events found for ${escapeHTML(nameUpper)}.</strong>
           <div class="small">Make sure you typed your last name exactly as it appears on the schedule.</div>
         </div>`;
       return;
@@ -399,17 +484,14 @@ async function processPDF(){
       if (!range){
         resultEl.innerHTML =
           `<div class="card err">
-            <strong>Events were found, but their day headers couldn’t be read.</strong>
+            <strong>Events were found, but day headers couldn’t be read.</strong>
             <div class="small">Enter a Start date and End date above, then press “Generate .ics” again.</div>
           </div>`;
         return;
       }
 
-      // Determine how many sections we need to map
-      // If the PDF never had readable headers, _sectionIndex will still increment on "DAY:" rows.
       const maxSection = Math.max(...events.map(e => (e._sectionIndex ?? 0)));
       const sectionsNeeded = maxSection + 1;
-
       const daysAvail = daysBetweenInclusive(range.start, range.end);
 
       if (sectionsNeeded > daysAvail){
@@ -421,68 +503,45 @@ async function processPDF(){
         return;
       }
 
-      // Map section 0->start date, section 1->start+1 day, etc.
       events = events.map(e => {
         if (e.date) return e;
         const idx = e._sectionIndex ?? 0;
         return { ...e, date: addDays(range.start, idx) };
       });
-
-    } else {
-      fallbackEl.style.display = "none";
     }
 
     // Dedup
     events = uniqBy(events, e => `${e.summary}|${e.start}|${e.end}|${e.description}|${e.date.toDateString()}`);
 
-    // Build ICS (each event uses its own date)
-let ics =
-`BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Squadron Schedule Tool//EN
-CALSCALE:GREGORIAN
-BEGIN:VTIMEZONE
-TZID:America/Los_Angeles
-BEGIN:STANDARD
-DTSTART:19701101T020000
-RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU
-TZOFFSETFROM:-0700
-TZOFFSETTO:-0800
-END:STANDARD
-BEGIN:DAYLIGHT
-DTSTART:19700308T020000
-RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU
-TZOFFSETFROM:-0800
-TZOFFSETTO:-0700
-END:DAYLIGHT
-END:VTIMEZONE
-`;
+    // Build ICS locked to Pacific Time
+    const ics = buildICS(events);
 
-for (const e of events){
-  ics += "BEGIN:VEVENT\n";
-  ics += `SUMMARY:${escapeICS(e.summary)}\n`;
-  ics += `DTSTART;TZID=America/Los_Angeles:${formatICSDate(e.date, e.start)}\n`;
-  ics += `DTEND;TZID=America/Los_Angeles:${formatICSDate(e.date, e.end)}\n`;
-  ics += `DESCRIPTION:${escapeICS(e.description)}\n`;
-  ics += "END:VEVENT\n";
-}
+    // Create download link (safe) + remember revoke
+    const dl = makeDownloadLink(ics);
+    window.__lastRevokeDownloadUrl = dl.revoke;
+    // Revoke after 2 minutes (enough time to download/import)
+    setTimeout(dl.revoke, 120000);
 
-ics += "END:VCALENDAR";
-
-    // Preview + download
+    // Preview + download (escape all dynamic HTML)
     let html = `<div class="card">
-      <div><span class="pill">${events.length} event(s)</span><span class="pill">Name: ${nameUpper}</span></div>
+      <div>
+        <span class="pill">${events.length} event(s)</span>
+        <span class="pill">Name: ${escapeHTML(nameUpper)}</span>
+        <span class="pill">TZ: ${escapeHTML(SCHEDULE_TZID)}</span>
+      </div>
       <div class="small">Tap to download:</div>
-      ${showDownloadLink(ics)}
+      ${dl.html}
       <hr>
     `;
+
     for (const e of events){
       html += `<div style="margin-bottom:10px;">
-        <div><strong>${e.summary}</strong></div>
-        <div class="small">${e.date.toDateString()} • ${e.start}–${e.end}</div>
-        <div class="small">Notes: ${e.description}</div>
+        <div><strong>${escapeHTML(e.summary)}</strong></div>
+        <div class="small">${escapeHTML(e.date.toDateString())} • ${escapeHTML(e.start)}–${escapeHTML(e.end)}</div>
+        <div class="small">Notes: ${escapeHTML(e.description)}</div>
       </div>`;
     }
+
     html += `</div>`;
     resultEl.innerHTML = html;
 
@@ -490,7 +549,7 @@ ics += "END:VCALENDAR";
     resultEl.innerHTML =
       `<div class="card err">
         <strong>Something crashed while parsing.</strong>
-        <div class="small">${escapeICS(err && err.stack ? err.stack : String(err))}</div>
+        <div class="small">${escapeHTML(err && err.stack ? err.stack : String(err))}</div>
       </div>`;
   } finally {
     goBtn.disabled = false;
@@ -500,4 +559,3 @@ ics += "END:VCALENDAR";
 
 </body>
 </html>
-
