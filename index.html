@@ -436,16 +436,38 @@ async function processPDF(){
     events = uniqBy(events, e => `${e.summary}|${e.start}|${e.end}|${e.description}|${e.date.toDateString()}`);
 
     // Build ICS (each event uses its own date)
-    let ics = "BEGIN:VCALENDAR\nVERSION:2.0\n";
-    for (const e of events){
-      ics += "BEGIN:VEVENT\n";
-      ics += `SUMMARY:${escapeICS(e.summary)}\n`;
-      ics += `DTSTART:${formatICSDate(e.date, e.start)}\n`;
-      ics += `DTEND:${formatICSDate(e.date, e.end)}\n`;
-      ics += `DESCRIPTION:${escapeICS(e.description)}\n`;
-      ics += "END:VEVENT\n";
-    }
-    ics += "END:VCALENDAR";
+let ics =
+`BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Squadron Schedule Tool//EN
+CALSCALE:GREGORIAN
+BEGIN:VTIMEZONE
+TZID:America/Los_Angeles
+BEGIN:STANDARD
+DTSTART:19701101T020000
+RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU
+TZOFFSETFROM:-0700
+TZOFFSETTO:-0800
+END:STANDARD
+BEGIN:DAYLIGHT
+DTSTART:19700308T020000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU
+TZOFFSETFROM:-0800
+TZOFFSETTO:-0700
+END:DAYLIGHT
+END:VTIMEZONE
+`;
+
+for (const e of events){
+  ics += "BEGIN:VEVENT\n";
+  ics += `SUMMARY:${escapeICS(e.summary)}\n`;
+  ics += `DTSTART;TZID=America/Los_Angeles:${formatICSDate(e.date, e.start)}\n`;
+  ics += `DTEND;TZID=America/Los_Angeles:${formatICSDate(e.date, e.end)}\n`;
+  ics += `DESCRIPTION:${escapeICS(e.description)}\n`;
+  ics += "END:VEVENT\n";
+}
+
+ics += "END:VCALENDAR";
 
     // Preview + download
     let html = `<div class="card">
@@ -478,3 +500,4 @@ async function processPDF(){
 
 </body>
 </html>
+
