@@ -313,8 +313,7 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
 
 // ---------- ICS builder (Pacific Time locked) ----------
 function buildICS(events){
-  let ics =
-`BEGIN:VCALENDAR
+  const lines = [`BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//Squadron Schedule Tool//EN
 CALSCALE:GREGORIAN
@@ -333,19 +332,19 @@ TZOFFSETFROM:-0800
 TZOFFSETTO:-0700
 END:DAYLIGHT
 END:VTIMEZONE
-`;
+`];
 
   for (const e of events){
-    ics += "BEGIN:VEVENT\n";
-    ics += `SUMMARY:${escapeICS(e.summary)}\n`;
-    ics += `DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}\n`;
-    ics += `DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.end)}\n`;
-    ics += `DESCRIPTION:${escapeICS(e.description)}\n`;
-    ics += "END:VEVENT\n";
+    lines.push("BEGIN:VEVENT\n");
+    lines.push(`SUMMARY:${escapeICS(e.summary)}\n`);
+    lines.push(`DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}\n`);
+    lines.push(`DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.end)}\n`);
+    lines.push(`DESCRIPTION:${escapeICS(e.description)}\n`);
+    lines.push("END:VEVENT\n");
   }
 
-  ics += "END:VCALENDAR";
-  return ics;
+  lines.push("END:VCALENDAR");
+  return lines.join("");
 }
 
 // ---------- main ----------
@@ -423,7 +422,7 @@ async function processPDF(){
           const text = normalizeSpaces(
             rows[y].sort((a,b)=>a.transform[4]-b.transform[4]).map(i=>i.str).join(" ")
           );
-          return { y, text };
+          return { y, text, upper: text.toUpperCase() };
         });
 
       let currentDateForSection = null;
@@ -433,7 +432,7 @@ async function processPDF(){
         const rowText = rowList[i].text;
 
         // Day header begins a new section
-        if (rowText.toUpperCase().includes("DAY:")){
+        if (rowList[i].upper.includes("DAY:")){
           currentSectionIndex += 1;
           const headerDate = parseDateFromHeaderRow(rowText);
           if (headerDate){
@@ -445,17 +444,13 @@ async function processPDF(){
           continue;
         }
 
-        if (!rowText.toUpperCase().includes(nameUpper)) continue;
+        if (!rowList[i].upper.includes(nameUpper)) continue;
 
         // Borrow context only for time recovery, not for notes.
-        const y0 = rowList[i].y;
-        const context = rowList
-          .filter(r => Math.abs(r.y - y0) <= 10)
-          .map(r => r.text)
-          .filter(t => t.length)
-          .join(" ")
-          .replace(/\s+/g, " ")
-          .trim();
+        const contextRows = [rowText];
+        if (i > 0 && Math.abs(rowList[i - 1].y - rowList[i].y) <= 10) contextRows.push(rowList[i - 1].text);
+        if (i + 1 < rowList.length && Math.abs(rowList[i + 1].y - rowList[i].y) <= 10) contextRows.push(rowList[i + 1].text);
+        const context = normalizeSpaces(contextRows.join(" "));
 
         const evt = parseRowToEvent(rowText, nameUpper, context, currentDateForSection);
         if (evt){
