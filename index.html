@@ -209,6 +209,25 @@ function parseDateFromHeaderRow(rowText){
   return tryParseDATEFromText(rowText) || tryParseJULIANFromText(rowText);
 }
 
+function parseDateFromHeaderContext(rowList, index){
+  const current = rowList[index];
+  if (!current || !current.upper.includes("DAY:")) return null;
+
+  const candidates = [
+    current.text,
+    `${current.text} ${rowList[index + 1]?.text || ""}`,
+    `${rowList[index - 1]?.text || ""} ${current.text}`,
+    `${rowList[index - 1]?.text || ""} ${current.text} ${rowList[index + 1]?.text || ""}`
+  ];
+
+  for (const candidate of candidates){
+    const parsed = tryParseDATEFromText(candidate) || tryParseJULIANFromText(candidate);
+    if (parsed) return parsed;
+  }
+
+  return null;
+}
+
 // ---------- manual date range ----------
 function getManualRange(){
   const s = document.getElementById("manualStartDate");
@@ -434,7 +453,7 @@ async function processPDF(){
         // Day header begins a new section
         if (rowList[i].upper.includes("DAY:")){
           currentSectionIndex += 1;
-          const headerDate = parseDateFromHeaderRow(rowText);
+          const headerDate = parseDateFromHeaderContext(rowList, i);
           if (headerDate){
             currentDateForSection = headerDate;
           } else {
