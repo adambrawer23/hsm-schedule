@@ -101,12 +101,10 @@
 
 <script>
 /**
- * Security & reliability upgrades included:
- * - Escape HTML in previews (prevents XSS via PDF text / user input)
- * - PDF size guard (prevents huge-file hang)
- * - More robust ICS escaping (handles \r\n)
- * - Locked TZ to America/Los_Angeles with VTIMEZONE + TZID
- * - Revoke object URLs after a short delay (memory hygiene)
+ * Notes:
+ * - Fix for 23 FEB-style PDFs: carry currentDateForSection across pages.
+ * - Security: escape HTML in preview, size guard, better ICS escaping, revoke object URL.
+ * - TZ: All events locked to America/Los_Angeles (Pacific).
  */
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
@@ -162,10 +160,26 @@ function makeDownloadLink(icsText){
 }
 
 // ---------- date parsing ----------
+function inferLikelyYear(monthIdx, day){
+  const now = new Date();
+  const candidates = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+  let bestDate = new Date(candidates[0], monthIdx, day, 12, 0, 0);
+
+  for (const y of candidates.slice(1)){
+    const cand = new Date(y, monthIdx, day, 12, 0, 0);
+    if (Math.abs(cand - now) < Math.abs(bestDate - now)) bestDate = cand;
+  }
+  return bestDate.getFullYear();
+}
+
 function tryParseDATEFromText(text){
   const t = normalizeSpaces(text).toUpperCase();
-  const m = t.match(/DATE:\s*(\d{1,2})\s*([A-Z](?:\s*[A-Z]){2}|[A-Z]{3})(?:\s*(\d{4}))?/) ||
-            t.match(/(?:^|\s)(\d{1,2})\s*([A-Z](?:\s*[A-Z]){2}|[A-Z]{3})(?:\s*(\d{4}))?(?=\s|$)/);
+
+  // Prefer explicit DATE: header; if year missing, infer.
+  const m =
+    t.match(/DATE:\s*(\d{1,2})\s*([A-Z](?:\s*[A-Z]){2}|[A-Z]{3})(?:\s*(\d{4}))?/) ||
+    t.match(/(?:^|\s)(\d{1,2})\s*([A-Z](?:\s*[A-Z]){2}|[A-Z]{3})(?:\s*(\d{4}))?(?=\s|$)/);
+
   if (!m) return null;
 
   const day = parseInt(m[1], 10);
@@ -176,21 +190,9 @@ function tryParseDATEFromText(text){
   if (!(mon in months)) return null;
 
   const year = Number.isFinite(yearFromHeader) ? yearFromHeader : inferLikelyYear(months[mon], day);
-
   return new Date(year, months[mon], day, 12, 0, 0);
 }
-function inferLikelyYear(monthIdx, day){
-  const now = new Date();
-  const candidates = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
-  let bestDate = new Date(candidates[0], monthIdx, day, 12, 0, 0);
 
-  for (const y of candidates.slice(1)){
-    const cand = new Date(y, monthIdx, day, 12, 0, 0);
-    if (Math.abs(cand - now) < Math.abs(bestDate - now)) bestDate = cand;
-  }
-
-  return bestDate.getFullYear();
-}
 function tryParseJULIANFromText(text){
   const t = normalizeSpaces(text).toUpperCase();
   const m = t.match(/JULIAN:\s*(\d{4})/);
@@ -217,11 +219,6 @@ function tryParseJULIANFromText(text){
   const d = new Date(year, 0, 1, 12, 0, 0);
   d.setDate(d.getDate() + (doy - 1));
   return d;
-}
-function parseDateFromHeaderRow(rowText){
-  const upper = rowText.toUpperCase();
-  if (!isDayHeaderRow(upper)) return null;
-  return tryParseDATEFromText(rowText) || tryParseJULIANFromText(rowText);
 }
 
 function isDayHeaderRow(upperText){
@@ -351,7 +348,8 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
 
 // ---------- ICS builder (Pacific Time locked) ----------
 function buildICS(events){
-  const lines = [`BEGIN:VCALENDAR
+  let ics =
+`BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//Squadron Schedule Tool//EN
 CALSCALE:GREGORIAN
@@ -370,19 +368,19 @@ TZOFFSETFROM:-0800
 TZOFFSETTO:-0700
 END:DAYLIGHT
 END:VTIMEZONE
-`];
+`;
 
   for (const e of events){
-    lines.push("BEGIN:VEVENT\n");
-    lines.push(`SUMMARY:${escapeICS(e.summary)}\n`);
-    lines.push(`DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}\n`);
-    lines.push(`DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.end)}\n`);
-    lines.push(`DESCRIPTION:${escapeICS(e.description)}\n`);
-    lines.push("END:VEVENT\n");
+    ics += "BEGIN:VEVENT\n";
+    ics += `SUMMARY:${escapeICS(e.summary)}\n`;
+    ics += `DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}\n`;
+    ics += `DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.end)}\n`;
+    ics += `DESCRIPTION:${escapeICS(e.description)}\n`;
+    ics += "END:VEVENT\n";
   }
 
-  lines.push("END:VCALENDAR");
-  return lines.join("");
+  ics += "END:VCALENDAR";
+  return ics;
 }
 
 // ---------- main ----------
@@ -442,6 +440,10 @@ async function processPDF(){
     let events = [];
     let totalUndatedSections = 0;
 
+    // ✅ KEY FIX: carry these across pages (page 2 often lacks the header)
+    let currentDateForSection = null;
+    let currentSectionIndex = -1;
+
     for (let p = 1; p <= pdf.numPages; p++){
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
@@ -463,15 +465,15 @@ async function processPDF(){
           return { y, text, upper: text.toUpperCase() };
         });
 
-      let currentDateForSection = null;
-      let currentSectionIndex = -1;
-
       for (let i = 0; i < rowList.length; i++){
         const rowText = rowList[i].text;
 
-        // Day header begins a new section
+        // Day/date header begins a new section (multi-day PDFs)
         if (isDayHeaderRow(rowList[i].upper)){
+          // Only increment section index when it looks like a real day break.
+          // If it's just a stray DATE: token repeated, it still works.
           currentSectionIndex += 1;
+
           const headerDate = parseDateFromHeaderContext(rowList, i);
           if (headerDate){
             currentDateForSection = headerDate;
