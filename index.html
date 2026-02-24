@@ -139,9 +139,20 @@ function guessType(rowText){
   if (t.includes("ICW") || t.includes("CAI") || t.includes("IGR") || t.includes("IMATT") || t.includes("CRT") || t.includes("EXAM") || t.includes("LAB")) return "CLASS";
   return "FLT";
 }
-// letters-only match key (handles weird PDF chunking / hidden chars)
-function matchKey(s){
-  return String(s).toUpperCase().replace(/[^A-Z]/g, "");
+
+// ---------- NEW: exact last-name token matching (fixes GAY vs GAYDOS) ----------
+function normalizeLastName(s){
+  return String(s).toUpperCase().trim().replace(/[^A-Z'-]/g, "");
+}
+function extractNameTokens(text){
+  const up = String(text).toUpperCase();
+  return up.match(/[A-Z]+(?:['-][A-Z]+)*/g) || [];
+}
+function hasExactLastNameToken(text, lastName){
+  const target = normalizeLastName(lastName);
+  if (!target) return false;
+  const toks = extractNameTokens(text);
+  return toks.some(t => t === target);
 }
 
 // Returns { html, revoke }
@@ -249,7 +260,6 @@ function parseDateRangeFromFilename(filename){
   const base = filename.replace(/\.[^.]+$/, ""); // strip extension
   const up = normalizeSpaces(base).toUpperCase();
 
-  // 21-22 FEB (optional year)
   let m = up.match(/\b(\d{1,2})\s*-\s*(\d{1,2})\s+([A-Z]{3})\b(?:\s+(\d{2,4}))?/);
   if (m){
     const d1 = parseInt(m[1],10), d2 = parseInt(m[2],10);
@@ -262,7 +272,6 @@ function parseDateRangeFromFilename(filename){
     };
   }
 
-  // 23 FEB (optional year)
   m = up.match(/\b(\d{1,2})\s+([A-Z]{3})\b(?:\s+(\d{2,4}))?/);
   if (m){
     const d = parseInt(m[1],10);
@@ -342,7 +351,6 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
     if (borrowed.length > times.length) times = borrowed;
   }
 
-  // SIM/FLT: BRF ETD ETA
   if (times.length >= 3){
     const brf = times[0];
     const eta = times[2];
@@ -357,7 +365,6 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
       description: rowText, start: brf, end: eta };
   }
 
-  // CLASS/Ground: START END
   if (times.length === 2){
     const shortTitle = rowText.length > 60 ? rowText.slice(0, 60).trim() + "…" : rowText;
     return { date: eventDate, summary: `CLASS – ${shortTitle}`, description: rowText, start: times[0], end: times[1] };
@@ -421,7 +428,6 @@ async function processPDF(){
   try {
     const nameRaw = (document.getElementById("nameInput").value || "").trim();
     const nameUpper = nameRaw.toUpperCase().replace(/\s+/g, "");
-    const nameKey = matchKey(nameRaw);
 
     if (!nameUpper){
       resultEl.innerHTML = `<div class="card err"><strong>Please enter your last name.</strong></div>`;
@@ -435,10 +441,8 @@ async function processPDF(){
     }
     const file = fileInput.files[0];
 
-    // filename-based fallback range
     const filenameRange = parseDateRangeFromFilename(file.name);
 
-    // DoS/perf guard
     const MAX_BYTES = 10 * 1024 * 1024; // 10MB
     if (file.size > MAX_BYTES){
       resultEl.innerHTML =
@@ -454,8 +458,7 @@ async function processPDF(){
 
     let events = [];
 
-    // ✅ carry date across pages
-    // Initialize with filename date if it exists (will be overridden by PDF header if found)
+    // carry across pages; seed with filename date if present
     let currentDateForSection = filenameRange ? filenameRange.start : null;
     let currentSectionIndex = -1;
 
@@ -477,33 +480,29 @@ async function processPDF(){
           const text = normalizeSpaces(
             rows[y].sort((a,b)=>a.transform[4]-b.transform[4]).map(i=>i.str).join(" ")
           );
-          return { y, text, upper: text.toUpperCase(), key: matchKey(text) };
+          return { y, text, upper: text.toUpperCase() };
         });
 
-      // 1) update currentDateForSection if we see a header
+      // update current date if header appears on this page
       for (let i = 0; i < rowList.length; i++){
         if (isDayHeaderRow(rowList[i].upper)){
           currentSectionIndex += 1;
           const headerDate = parseDateFromHeaderContext(rowList, i);
           if (headerDate) currentDateForSection = headerDate;
-          continue;
         }
       }
 
-      // 2) find rows that contain the name (robust)
+      // find name rows using EXACT token match
       for (let i = 0; i < rowList.length; i++){
         const row = rowList[i];
-        if (!row.key.includes(nameKey)) continue;
+        if (!hasExactLastNameToken(row.text, nameRaw)) continue;
 
         // context window: 2 above + 2 below
         const lo = Math.max(0, i - 2);
         const hi = Math.min(rowList.length - 1, i + 2);
         const context = normalizeSpaces(rowList.slice(lo, hi + 1).map(r => r.text).join(" "));
 
-        // Notes must be the exact row containing the name
-        const notesRowText = row.text;
-
-        const evt = parseRowToEvent(notesRowText, nameUpper, context, currentDateForSection);
+        const evt = parseRowToEvent(row.text, nameUpper, context, currentDateForSection);
         if (evt){
           evt._sectionIndex = currentSectionIndex;
           events.push(evt);
@@ -515,17 +514,15 @@ async function processPDF(){
       resultEl.innerHTML =
         `<div class="card err">
           <strong>No events found for ${escapeHTML(nameUpper)}.</strong>
-          <div class="small">If the name is definitely on the PDF, it may be encoded unusually. Try a different spelling/case exactly as shown.</div>
+          <div class="small">Make sure the name is typed exactly as it appears on the schedule.</div>
         </div>`;
       return;
     }
 
-    // Apply fallback date logic: PDF header > filename > manual
+    // If missing date, try filename range mapping
     let missingDate = events.some(e => !e.date);
 
     if (missingDate && filenameRange){
-      // If single-day filename, use that for missing dates
-      // If range filename, map by section index (0->start, 1->start+1, etc.)
       const maxSection = Math.max(...events.map(e => (e._sectionIndex ?? 0)));
       const sectionsNeeded = maxSection + 1;
       const daysAvail = daysBetweenInclusive(filenameRange.start, filenameRange.end);
@@ -543,7 +540,6 @@ async function processPDF(){
     if (missingDate){
       fallbackEl.style.display = "block";
 
-      // If filenameRange exists, pre-fill manual inputs to make it easy
       if (filenameRange){
         const s = document.getElementById("manualStartDate");
         const e = document.getElementById("manualEndDate");
@@ -582,7 +578,6 @@ async function processPDF(){
       });
     }
 
-    // Dedup
     events = uniqBy(events, e => `${e.summary}|${e.start}|${e.end}|${e.description}|${e.date.toDateString()}`);
 
     const ics = buildICS(events);
