@@ -1,3 +1,12 @@
+You are completely right, and this points to a limitation in how the standard `.ics` file format works.
+
+Calendar applications only support two primary time blocks for an event: `DTSTART` (Start) and `DTEND` (End). Because of this, the script was correctly identifying all three of your times (1730, 2000, 0015), but it was assigning your Brief (1730) as the Start and your Land (0015) as the End, quietly discarding your Takeoff time (2000) because there is no official `.ics` field for it.
+
+As a pilot, your Takeoff/ETD is critical. To fix this, I have updated the script to explicitly capture that middle Takeoff time and automatically inject it at the very top of the Calendar Event's notes/description. I also updated the website's preview interface so it clearly displays your Brief, Takeoff, and Land times confirming it parsed everything correctly before you even hit download.
+
+Here is the fully updated, final code with all the fixes included (Midnight Crossover, Apple strict formatting, UID/DTSTAMP generation, Class dynamic typing, and the new Takeoff Time injection).
+
+```html
 <!DOCTYPE html>
 <html>
 <head>
@@ -138,7 +147,7 @@ function guessType(rowText){
   return "FLT";
 }
 
-// ---------- NEW: exact last-name token matching ----------
+// ---------- exact last-name token matching ----------
 function normalizeLastName(s){
   return String(s).toUpperCase().trim().replace(/[^A-Z'-]/g, "");
 }
@@ -155,7 +164,7 @@ function hasExactLastNameToken(text, lastName){
 
 // Returns { html, revoke }
 function makeDownloadLink(icsText){
-  // Add charset=utf-8 to the MIME type to prevent Safari generic errors
+  // UTF-8 charset required for Safari strict parsing
   const blob = new Blob([icsText], { type: "text/calendar;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const html = `<a class="dl" href="${url}" download="schedule.ics">Download .ics</a>`;
@@ -255,7 +264,7 @@ function parseYearToken(y){
   return null;
 }
 function parseDateRangeFromFilename(filename){
-  const base = filename.replace(/\.[^.]+$/, ""); // strip extension
+  const base = filename.replace(/\.[^.]+$/, "");
   const up = normalizeSpaces(base).toUpperCase();
 
   let m = up.match(/\b(\d{1,2})\s*-\s*(\d{1,2})\s+([A-Z]{3})\b(?:\s+(\d{2,4}))?/);
@@ -349,8 +358,10 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
     if (borrowed.length > times.length) times = borrowed;
   }
 
+  // 3 TIMES FOUND: Capture Brief, Takeoff (ETD), and Land
   if (times.length >= 3){
     const brf = times[0];
+    const etd = times[1];
     const eta = times[2];
 
     const evtNumMatch = rowText.match(/^\s*(\d+)\s+/);
@@ -358,14 +369,18 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
 
     const nameMatch = rowText.match(/^\s*\d+\s+(.*?)(?=\s+\d{4}\b)/);
     const evtName = nameMatch ? nameMatch[1].trim() : "Event";
+    
+    // Inject Takeoff Time into the body of the notes
+    const descWithEtd = `Takeoff (ETD): ${etd}\n\nSchedule Data:\n${rowText}`;
 
     return { date: eventDate, summary: `${type} ${evtNumber} – ${evtName}`.replace(/\s+/g," ").trim(),
-      description: rowText, start: brf, end: eta };
+      description: descWithEtd, start: brf, end: eta, etd: etd };
   }
 
+  // 2 TIMES FOUND: Dynamic fallback instead of forcing "CLASS"
   if (times.length === 2){
     const shortTitle = rowText.length > 60 ? rowText.slice(0, 60).trim() + "…" : rowText;
-    return { date: eventDate, summary: `CLASS – ${shortTitle}`, description: rowText, start: times[0], end: times[1] };
+    return { date: eventDate, summary: `${type} – ${shortTitle}`, description: rowText, start: times[0], end: times[1] };
   }
 
   return null;
@@ -395,8 +410,18 @@ function buildICS(events){
     "END:VTIMEZONE"
   ];
 
-  for (const e of events){
+  // Generate DTSTAMP required by strict Apple iCalendar rules
+  const now = new Date();
+  const dtstamp = now.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+
+  for (let i = 0; i < events.length; i++){
+    const e = events[i];
     lines.push("BEGIN:VEVENT");
+    
+    // Required properties for iOS/macOS success
+    lines.push(`DTSTAMP:${dtstamp}`);
+    lines.push(`UID:${dtstamp}-${i}-${e.start}@squadronschedule`);
+
     lines.push(`SUMMARY:${escapeICS(e.summary)}`);
     lines.push(`DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}`);
     
@@ -410,20 +435,20 @@ function buildICS(events){
   }
   lines.push("END:VCALENDAR");
 
-  // RFC 5545 requires lines longer than 75 octets to be folded
+  // RFC 5545 75-character line folding
   const foldedLines = lines.map(line => {
     if (line.length <= 75) return line;
     let folded = "";
     let current = line;
     while (current.length > 75) {
-      folded += current.substring(0, 75) + "\r\n "; // Fold with CRLF + Space
+      folded += current.substring(0, 75) + "\r\n "; 
       current = current.substring(75);
     }
     folded += current;
     return folded;
   });
 
-  // iCalendar strictly requires CRLF line endings
+  // Strict CRLF endings
   return foldedLines.join("\r\n") + "\r\n";
 }
 
@@ -460,7 +485,7 @@ async function processPDF(){
 
     const filenameRange = parseDateRangeFromFilename(file.name);
 
-    const MAX_BYTES = 10 * 1024 * 1024; // 10MB
+    const MAX_BYTES = 10 * 1024 * 1024;
     if (file.size > MAX_BYTES){
       resultEl.innerHTML =
         `<div class="card err">
@@ -475,7 +500,6 @@ async function processPDF(){
 
     let events = [];
 
-    // carry across pages; seed with filename date if present
     let currentDateForSection = filenameRange ? filenameRange.start : null;
     let currentSectionIndex = -1;
 
@@ -500,7 +524,6 @@ async function processPDF(){
           return { y, text, upper: text.toUpperCase() };
         });
 
-      // update current date if header appears on this page
       for (let i = 0; i < rowList.length; i++){
         if (isDayHeaderRow(rowList[i].upper)){
           currentSectionIndex += 1;
@@ -509,12 +532,10 @@ async function processPDF(){
         }
       }
 
-      // find name rows using EXACT token match
       for (let i = 0; i < rowList.length; i++){
         const row = rowList[i];
         if (!hasExactLastNameToken(row.text, nameRaw)) continue;
 
-        // context window: 2 above + 2 below
         const lo = Math.max(0, i - 2);
         const hi = Math.min(rowList.length - 1, i + 2);
         const context = normalizeSpaces(rowList.slice(lo, hi + 1).map(r => r.text).join(" "));
@@ -536,7 +557,6 @@ async function processPDF(){
       return;
     }
 
-    // If missing date, try filename range mapping
     let missingDate = events.some(e => !e.date);
 
     if (missingDate && filenameRange){
@@ -616,10 +636,13 @@ async function processPDF(){
     `;
 
     for (const e of events){
+      // Expose the Takeoff Time (ETD) in the UI preview if it exists
+      const etdBlock = e.etd ? ` • <strong>Takeoff: ${escapeHTML(e.etd)}</strong>` : "";
+      
       html += `<div style="margin-bottom:10px;">
         <div><strong>${escapeHTML(e.summary)}</strong></div>
-        <div class="small">${escapeHTML(e.date.toDateString())} • ${escapeHTML(e.start)}–${escapeHTML(e.end)}</div>
-        <div class="small">Notes: ${escapeHTML(e.description)}</div>
+        <div class="small">${escapeHTML(e.date.toDateString())} • Brief: ${escapeHTML(e.start)}${etdBlock} • Land: ${escapeHTML(e.end)}</div>
+        <div class="small" style="margin-top: 4px;">Notes: ${escapeHTML(e.description.replace(/\n/g, " "))}</div>
       </div>`;
     }
 
@@ -640,3 +663,5 @@ async function processPDF(){
 
 </body>
 </html>
+
+```
