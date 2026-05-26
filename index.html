@@ -4,7 +4,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Schedule → Calendar (.ics)</title>
 
-<!-- pdf.js -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 
 <style>
@@ -61,7 +60,6 @@
 <div class="label">Schedule PDF</div>
 <input type="file" id="pdfUpload" accept="application/pdf">
 
-<!-- Hidden unless needed -->
 <div id="dateFallback" style="display:none;">
   <div class="card warn">
     <strong>Couldn’t auto-detect a date from the PDF or filename.</strong>
@@ -157,7 +155,8 @@ function hasExactLastNameToken(text, lastName){
 
 // Returns { html, revoke }
 function makeDownloadLink(icsText){
-  const blob = new Blob([icsText], { type: "text/calendar" });
+  // Add charset=utf-8 to the MIME type to prevent Safari generic errors
+  const blob = new Blob([icsText], { type: "text/calendar;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const html = `<a class="dl" href="${url}" download="schedule.ics">Download .ics</a>`;
   const revoke = () => { try { URL.revokeObjectURL(url); } catch (_) {} };
@@ -375,39 +374,53 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
 
 // ---------- ICS builder (Pacific Time locked) ----------
 function buildICS(events){
-  let ics =
-`BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Squadron Schedule Tool//EN
-CALSCALE:GREGORIAN
-BEGIN:VTIMEZONE
-TZID:${SCHEDULE_TZID}
-BEGIN:STANDARD
-DTSTART:19701101T020000
-RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU
-TZOFFSETFROM:-0700
-TZOFFSETTO:-0800
-END:STANDARD
-BEGIN:DAYLIGHT
-DTSTART:19700308T020000
-RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU
-TZOFFSETFROM:-0800
-TZOFFSETTO:-0700
-END:DAYLIGHT
-END:VTIMEZONE
-`;
+  let lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Squadron Schedule Tool//EN",
+    "CALSCALE:GREGORIAN",
+    "BEGIN:VTIMEZONE",
+    `TZID:${SCHEDULE_TZID}`,
+    "BEGIN:STANDARD",
+    "DTSTART:19701101T020000",
+    "RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU",
+    "TZOFFSETFROM:-0700",
+    "TZOFFSETTO:-0800",
+    "END:STANDARD",
+    "BEGIN:DAYLIGHT",
+    "DTSTART:19700308T020000",
+    "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU",
+    "TZOFFSETFROM:-0800",
+    "TZOFFSETTO:-0700",
+    "END:DAYLIGHT",
+    "END:VTIMEZONE"
+  ];
 
   for (const e of events){
-    ics += "BEGIN:VEVENT\n";
-    ics += `SUMMARY:${escapeICS(e.summary)}\n`;
-    ics += `DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}\n`;
-    ics += `DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.end)}\n`;
-    ics += `DESCRIPTION:${escapeICS(e.description)}\n`;
-    ics += "END:VEVENT\n";
+    lines.push("BEGIN:VEVENT");
+    lines.push(`SUMMARY:${escapeICS(e.summary)}`);
+    lines.push(`DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}`);
+    lines.push(`DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.end)}`);
+    lines.push(`DESCRIPTION:${escapeICS(e.description)}`);
+    lines.push("END:VEVENT");
   }
+  lines.push("END:VCALENDAR");
 
-  ics += "END:VCALENDAR";
-  return ics;
+  // RFC 5545 requires lines longer than 75 octets to be folded
+  const foldedLines = lines.map(line => {
+    if (line.length <= 75) return line;
+    let folded = "";
+    let current = line;
+    while (current.length > 75) {
+      folded += current.substring(0, 75) + "\r\n "; // Fold with CRLF + Space
+      current = current.substring(75);
+    }
+    folded += current;
+    return folded;
+  });
+
+  // iCalendar strictly requires CRLF line endings
+  return foldedLines.join("\r\n") + "\r\n";
 }
 
 // ---------- main ----------
