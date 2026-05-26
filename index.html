@@ -138,7 +138,7 @@ function guessType(rowText){
   return "FLT";
 }
 
-// ---------- NEW: exact last-name token matching (fixes GAY vs GAYDOS) ----------
+// ---------- NEW: exact last-name token matching ----------
 function normalizeLastName(s){
   return String(s).toUpperCase().trim().replace(/[^A-Z'-]/g, "");
 }
@@ -254,7 +254,6 @@ function parseYearToken(y){
   if (s.length === 2) return 2000 + parseInt(s, 10);
   return null;
 }
-// supports: "23 FEB", "23 FEB 26", "21-22 FEB", "21-22 FEB 26"
 function parseDateRangeFromFilename(filename){
   const base = filename.replace(/\.[^.]+$/, ""); // strip extension
   const up = normalizeSpaces(base).toUpperCase();
@@ -400,7 +399,12 @@ function buildICS(events){
     lines.push("BEGIN:VEVENT");
     lines.push(`SUMMARY:${escapeICS(e.summary)}`);
     lines.push(`DTSTART;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.start)}`);
-    lines.push(`DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(e.date, e.end)}`);
+    
+    // MIDNIGHT CROSSOVER FIX
+    const endCrossesMidnight = parseInt(e.end, 10) < parseInt(e.start, 10);
+    const endDate = endCrossesMidnight ? addDays(e.date, 1) : e.date;
+    
+    lines.push(`DTEND;TZID=${SCHEDULE_TZID}:${formatICSDate(endDate, e.end)}`);
     lines.push(`DESCRIPTION:${escapeICS(e.description)}`);
     lines.push("END:VEVENT");
   }
