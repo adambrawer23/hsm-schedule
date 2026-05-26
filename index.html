@@ -341,11 +341,17 @@ function pickTimesNearestName(text, nameUpper, count){
 }
 
 function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
+  // Determine if this is a Flight, Sim, or Class
   const type = guessType(rowText);
+  
+  // Flights and Sims expect 3 times (Brief, Takeoff, Land). Classes expect 2.
+  const expectedTimes = (type === "CLASS") ? 2 : 3;
 
-  let times = pickTimesNearestName(rowText, nameUpper, 3);
-  if (times.length < 2 && contextText){
-    const borrowed = pickTimesNearestName(contextText, nameUpper, 3);
+  let times = pickTimesNearestName(rowText, nameUpper, expectedTimes);
+  
+  // If the PDF scraper missed a time on this invisible line, search the context text
+  if (times.length < expectedTimes && contextText){
+    const borrowed = pickTimesNearestName(contextText, nameUpper, expectedTimes);
     if (borrowed.length > times.length) times = borrowed;
   }
 
@@ -368,7 +374,7 @@ function parseRowToEvent(rowText, nameUpper, contextText, eventDate){
       description: descWithEtd, start: brf, end: eta, etd: etd };
   }
 
-  // 2 TIMES FOUND: Dynamic fallback instead of forcing "CLASS"
+  // 2 TIMES FOUND: Dynamic fallback 
   if (times.length === 2){
     const shortTitle = rowText.length > 60 ? rowText.slice(0, 60).trim() + "…" : rowText;
     return { date: eventDate, summary: `${type} – ${shortTitle}`, description: rowText, start: times[0], end: times[1] };
