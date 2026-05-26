@@ -1,12 +1,3 @@
-You are completely right, and this points to a limitation in how the standard `.ics` file format works.
-
-Calendar applications only support two primary time blocks for an event: `DTSTART` (Start) and `DTEND` (End). Because of this, the script was correctly identifying all three of your times (1730, 2000, 0015), but it was assigning your Brief (1730) as the Start and your Land (0015) as the End, quietly discarding your Takeoff time (2000) because there is no official `.ics` field for it.
-
-As a pilot, your Takeoff/ETD is critical. To fix this, I have updated the script to explicitly capture that middle Takeoff time and automatically inject it at the very top of the Calendar Event's notes/description. I also updated the website's preview interface so it clearly displays your Brief, Takeoff, and Land times confirming it parsed everything correctly before you even hit download.
-
-Here is the fully updated, final code with all the fixes included (Midnight Crossover, Apple strict formatting, UID/DTSTAMP generation, Class dynamic typing, and the new Takeoff Time injection).
-
-```html
 <!DOCTYPE html>
 <html>
 <head>
